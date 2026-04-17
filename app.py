@@ -50,8 +50,6 @@ attack_queue = []
 is_attacking = False
 current_attack = None
 
-import certifi  # Add this import at the top of app.py
-
 # ==================== DATABASE SETUP ====================
 USE_MONGO = False
 MONGO_URL = os.environ.get("MONGO_URL")
@@ -63,12 +61,23 @@ if MONGO_URL:
             connectTimeoutMS=30000,
             socketTimeoutMS=30000,
             tls=True,
-            tlsCAFile=certifi.where()   # FIXES SSL HANDSHAKE ON RENDER
+            tlsCAFile=certifi.where()
         )
         mongo_client.admin.command('ping')
         db = mongo_client['stresser_db']
         USE_MONGO = True
         print("✅ MongoDB connected")
+
+        # Ensure admin_users collection exists and has at least one admin
+        if 'admin_users' not in db.list_collection_names():
+            db.create_collection('admin_users')
+        if db.admin_users.count_documents({}) == 0:
+            db.admin_users.insert_one({
+                "username": "admin",
+                "password_hash": generate_password_hash("admin123"),
+                "created_at": datetime.utcnow()
+            })
+            print("✅ Default admin created in MongoDB (admin / admin123)")
     except Exception as e:
         print(f"❌ MongoDB error: {e} – falling back to SQLite")
         USE_MONGO = False
