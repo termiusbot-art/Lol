@@ -47,13 +47,22 @@ USE_MONGO = False
 MONGO_URL = os.environ.get("MONGO_URL")
 if MONGO_URL:
     try:
-        mongo_client = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)
+        # Ensure TLS is enabled for Atlas connection
+        mongo_client = MongoClient(
+            MONGO_URL,
+            serverSelectionTimeoutMS=10000,
+            connectTimeoutMS=30000,
+            socketTimeoutMS=30000,
+            tls=True,
+            tlsAllowInvalidCertificates=False
+        )
         mongo_client.admin.command('ping')
         db = mongo_client['stresser_db']
         USE_MONGO = True
         print("✅ MongoDB connected")
     except Exception as e:
         print(f"❌ MongoDB error: {e} – falling back to SQLite")
+        USE_MONGO = False
 else:
     print("⚠️ MONGO_URL not set – using SQLite")
 
@@ -68,6 +77,8 @@ else:
     app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///stresser.db'
     app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
     db_sql = SQLAlchemy(app)
+
+    # ... (rest of SQLAlchemy models unchanged)
 
     class User(db_sql.Model):
         id = db_sql.Column(db_sql.Integer, primary_key=True)
@@ -1252,7 +1263,8 @@ a{color:#00ffcc; text-decoration:none;}
     <div class="mb-3"><label class="form-label">Captcha: {{ captcha_question }}</label><input type="text" name="captcha" class="form-control" placeholder="Your answer" required></div>
     <button type="submit" class="btn-neon">🚀 Login</button>
 </form>
-<p class="text-center mt-3">No token? <a href="/register">Generate one</a> | <a href="/redeem">Redeem Key</a></p><hr><p class="text-center mt-3"><small>Admin? <a href="/admin/login">Admin Login</a></small></p></div></body></html>
+<p class="text-center mt-3">No token? <a href="/register">Generate one</a></p>
+<hr><p class="text-center mt-3"><small>Admin? <a href="/admin/login">Admin Login</a></small></p></div></body></html>
 '''
 
 REGISTER_HTML = '''
