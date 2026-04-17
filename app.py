@@ -1109,7 +1109,37 @@ input,select{background:rgba(0,0,0,0.5); border:1px solid #2a3a5a; border-radius
 <script>document.querySelector('input[name="concurrent"]').addEventListener('input',function(e){this.nextElementSibling.value=this.value;});</script>
 </body></html>
 '''
-PRODUCTS_HTML = ''' ... '''
+PRODUCTS_HTML = '''
+<!DOCTYPE html>
+<html><head><title>Products • STRESSER</title><meta name="viewport" content="width=device-width, initial-scale=1">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<style>body{background:radial-gradient(circle at 10% 20%, #0a0a1a, #000); font-family:'Inter',sans-serif; color:#fff; padding:20px; animation:fadeInUp 0.6s ease-out;}
+.glass-card{background:rgba(15,25,45,0.45);backdrop-filter:blur(12px);border-radius:32px;border:1px solid rgba(0,255,200,0.2);padding:28px;margin-bottom:30px;transition:0.3s;}
+.glass-card:hover{border-color:rgba(0,255,200,0.6);transform:translateY(-3px);}
+.btn-neon{background:linear-gradient(90deg,#00b377,#00cc88);border:none;border-radius:60px;padding:12px 24px;font-weight:bold;color:#000;}
+.pricing-card{text-align:center;}.price{font-size:36px;font-weight:800;color:#00ffcc;}
+.telegram-link{color:#00ffcc; text-decoration:none; font-weight:600;}
+.telegram-link:hover{text-decoration:underline;}
+@keyframes fadeInUp{from{opacity:0;transform:translateY(20px);}to{opacity:1;transform:translateY(0);}}
+</style>
+</head>
+<body><div class="container py-4">
+<div class="d-flex justify-content-between align-items-center mb-4"><h2 style="color:#00ffcc;">🚀 Upgrade Your Plan</h2><a href="/dashboard" class="btn btn-link text-info">← Back</a></div>
+<div class="row g-4">
+{% for plan in plans %}
+<div class="col-md-3"><div class="glass-card pricing-card"><h3>{{ plan.name }}</h3><div class="price">{{ plan.price }}</div>
+<div class="mt-3"><p><i class="fas fa-layer-group"></i> {{ plan.concurrent }} Concurrent</p><p><i class="fas fa-hourglass-half"></i> {{ plan.duration }}s Max</p></div>
+<a href="https://t.me/Ig_ansh" target="_blank" class="btn-neon mt-3" style="display:inline-block; text-decoration:none;">💬 Contact on Telegram</a></div></div>
+{% endfor %}
+</div>
+<div class="glass-card mt-4 text-center"><h4>Need a custom plan?</h4><p>Reach out directly on Telegram:</p>
+<a href="https://t.me/Ig_ansh" target="_blank" class="btn-neon" style="display:inline-block; text-decoration:none;"><i class="fab fa-telegram-plane me-2"></i>@Ig_ansh</a>
+<p class="mt-3"><small>Click the button to open Telegram</small></p></div>
+</div></body></html>
+'''
+
 ADMIN_LOGIN_HTML = '''
 <!DOCTYPE html>
 <html><head><title>Admin Login • STRESSER</title><meta name="viewport" content="width=device-width, initial-scale=1">
