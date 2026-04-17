@@ -50,6 +50,8 @@ attack_queue = []
 is_attacking = False
 current_attack = None
 
+import certifi  # Add this import at the top of app.py
+
 # ==================== DATABASE SETUP ====================
 USE_MONGO = False
 MONGO_URL = os.environ.get("MONGO_URL")
@@ -61,7 +63,7 @@ if MONGO_URL:
             connectTimeoutMS=30000,
             socketTimeoutMS=30000,
             tls=True,
-            tlsCAFile=certifi.where()
+            tlsCAFile=certifi.where()   # FIXES SSL HANDSHAKE ON RENDER
         )
         mongo_client.admin.command('ping')
         db = mongo_client['stresser_db']
