@@ -639,23 +639,30 @@ def products_page():
 @app.route('/redeem', methods=['GET', 'POST'])
 def redeem_key():
     if request.method == 'POST':
-        key_str = request.form.get('key').strip().upper()
+        key_str = request.form.get('key', '').strip().upper()
+        print(f"Redeem attempt with key: {key_str}")  # Debug log
+        
         if USE_MONGO:
             key = generated_keys_col.find_one({"key": key_str, "active": True, "used_by": None})
         else:
             key = GeneratedKey.query.filter_by(key=key_str, active=True, used_by=None).first()
+        
         if not key:
             flash('Invalid or already used key', 'danger')
-            return redirect(url_for('redeem_key'))
+            return redirect(url_for('dashboard'))
+        
         days = key['duration_days'] if USE_MONGO else key.duration_days
+        
         if 'user_id' in session:
             if USE_MONGO:
                 user = users_col.find_one({"_id": ObjectId(session['user_id'])})
             else:
                 user = User.query.get(session['user_id'])
+            
             if not user:
                 session.clear()
                 return redirect(url_for('login'))
+            
             expiry = datetime.utcnow() + timedelta(days=days)
             if USE_MONGO:
                 users_col.update_one({"_id": user['_id']}, {"$set": {"expiry": expiry, "role": "user"}})
@@ -664,6 +671,7 @@ def redeem_key():
                 user.role = 'user'
                 db_sql.session.commit()
         else:
+            # User not logged in – create new account with key
             token = generate_token()
             expiry = datetime.utcnow() + timedelta(days=days)
             if USE_MONGO:
@@ -679,6 +687,8 @@ def redeem_key():
             session['user_token'] = token
             session['user_id'] = str(user_id) if USE_MONGO else user_id
             session['user_role'] = 'user'
+        
+        # Mark key as used
         if USE_MONGO:
             generated_keys_col.update_one({"_id": key['_id']}, {"$set": {"used_by": session['user_id'], "used_at": datetime.utcnow(), "active": False}})
         else:
@@ -686,8 +696,11 @@ def redeem_key():
             key.used_at = datetime.utcnow()
             key.active = False
             db_sql.session.commit()
-        flash('Key redeemed successfully!', 'success')
+        
+        flash('Key redeemed successfully! Your plan has been upgraded.', 'success')
         return redirect(url_for('dashboard'))
+    
+    # GET request – show redeem page
     return render_template_string(REDEEM_HTML)
 
 @app.route('/logout')
@@ -1344,18 +1357,18 @@ body{background:radial-gradient(circle at 10% 20%, #0a0a1a, #000); font-family:'
         <div class="mt-4"><a href="/products" class="btn-neon">⚡ Upgrade Now</a></div>
     </div>
 
-    <!-- REDEEM KEY CARD (NEW) -->
-    <div class="glass-card">
-        <h3><i class="fas fa-key me-2"></i> Redeem Access Key</h3>
-        <p>Have a premium key? Redeem it here to upgrade your plan instantly.</p>
-        <form method="POST" action="/redeem">
-            <div class="input-group">
-                <input type="text" name="key" class="form-control bg-dark text-white" placeholder="Enter your key (e.g., KEY-XXXXXXXX)" required>
-                <button type="submit" class="btn-neon" style="width:auto; padding:12px 30px; border-radius:60px;">Redeem</button>
-            </div>
-        </form>
-        <small class="text-muted">Key will be applied to your current account.</small>
-    </div>
+<!-- REDEEM KEY CARD (FIXED) -->
+<div class="glass-card">
+    <h3><i class="fas fa-key me-2"></i> Redeem Access Key</h3>
+    <p>Have a premium key? Redeem it here to upgrade your plan instantly.</p>
+    <form method="POST" action="/redeem" id="redeemForm">
+        <div class="input-group">
+            <input type="text" name="key" class="form-control bg-dark text-white" placeholder="Enter your key (e.g., KEY-XXXXXXXX)" required>
+            <button type="submit" class="btn-neon" style="width:auto; padding:12px 30px; border-radius:60px;">Redeem</button>
+        </div>
+    </form>
+    <small class="text-muted">Key will be applied to your current account.</small>
+</div>
 
     <!-- Recent Attacks Card -->
     <div class="glass-card">
