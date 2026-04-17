@@ -20,6 +20,7 @@ from bson.objectid import ObjectId
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_sqlalchemy import SQLAlchemy
 from github import Github, GithubException
+import certifi
 
 # ==================== FLASK APP INIT ====================
 app = Flask(__name__)
@@ -47,14 +48,13 @@ USE_MONGO = False
 MONGO_URL = os.environ.get("MONGO_URL")
 if MONGO_URL:
     try:
-        # Ensure TLS is enabled for Atlas connection
         mongo_client = MongoClient(
             MONGO_URL,
             serverSelectionTimeoutMS=10000,
             connectTimeoutMS=30000,
             socketTimeoutMS=30000,
             tls=True,
-            tlsAllowInvalidCertificates=False
+            tlsCAFile=certifi.where()  # Fixes SSL handshake on Render
         )
         mongo_client.admin.command('ping')
         db = mongo_client['stresser_db']
@@ -74,10 +74,10 @@ if USE_MONGO:
     admin_users_col = db['admin_users']
     generated_keys_col = db['generated_keys']
 else:
+    # SQLite fallback (your existing code)
     app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///stresser.db'
     app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
     db_sql = SQLAlchemy(app)
-
     # ... (rest of SQLAlchemy models unchanged)
 
     class User(db_sql.Model):
