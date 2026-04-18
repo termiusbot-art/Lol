@@ -1975,57 +1975,74 @@ ADMIN_MANAGE_HTML = '''
 <html><head><title>Manage Admins • STRESSER</title><meta name="viewport" content="width=device-width, initial-scale=1">
 <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-<style>body{background:#0a0a1a;color:#fff;padding:20px;}.glass-card{background:rgba(15,25,45,0.45);border-radius:24px;padding:20px;margin-bottom:20px;}
+<style>
+body{background:#0a0a1a;color:#fff;padding:20px;font-family:'Inter',sans-serif;}
+.glass-card{background:rgba(15,25,45,0.9);border-radius:24px;padding:20px;margin-bottom:20px;border:1px solid rgba(0,255,200,0.2);}
 .btn-neon{background:linear-gradient(90deg,#00b377,#00cc88);border:none;border-radius:40px;padding:8px 20px;font-weight:bold;color:#000;}
-.btn-danger{background:#ff3355;border:none;color:#fff;}.btn-warning{background:#ffaa00;color:#000;}</style>
+.btn-danger{background:#ff3355;border:none;color:#fff;padding:8px 16px;border-radius:40px;font-weight:bold;}
+.btn-warning{background:#ffaa00;color:#000;padding:8px 16px;border-radius:40px;font-weight:bold;}
+.btn-secondary{background:#6c757d;color:#fff;}
+input, select, textarea{background:rgba(0,0,0,0.7);border:1px solid #2a3a5a;border-radius:40px;padding:10px 18px;color:#fff;width:100%;}
+input:focus, select:focus{outline:none;border-color:#00ffcc;box-shadow:0 0 8px #00ffcc;}
+label{color:#ccd6f0;margin-bottom:5px;font-weight:500;}
+.form-check-input{width:18px;height:18px;margin-right:8px;background:rgba(0,0,0,0.7);border:1px solid #2a3a5a;}
+.form-check-label{color:#fff;}
+.modal-content{background:#1a1f35;color:#fff;border:1px solid #2a3a5a;}
+.modal-header{border-bottom:1px solid #2a3a5a;}
+.modal-footer{border-top:1px solid #2a3a5a;}
+.table{color:#fff;}
+.table-dark{--bs-table-bg:#0d1117;--bs-table-color:#fff;}
+.badge{font-size:0.85rem;padding:5px 10px;}
+</style>
 </head>
 <body><div class="container">
-<div class="glass-card"><h2><i class="fas fa-user-shield me-2"></i>Manage Administrators</h2>
-<a href="/admin/dashboard" class="btn btn-secondary mb-3">← Back</a>
+<div class="glass-card"><h2><i class="fas fa-user-shield me-2" style="color:#00ffcc;"></i>Manage Administrators</h2>
+<a href="/admin/dashboard" class="btn btn-secondary mb-3"><i class="fas fa-arrow-left"></i> Back</a>
 
 <!-- Add New Admin -->
-<div class="card bg-dark mb-4">
-  <div class="card-header">➕ Create New Admin</div>
+<div class="card bg-dark mb-4" style="background:#0d1117; border:1px solid #2a3a5a;">
+  <div class="card-header" style="background:#161c27; color:#00ffcc; font-weight:600;"><i class="fas fa-plus-circle me-2"></i>Create New Admin</div>
   <div class="card-body">
     <form method="POST" action="/admin/manage/add">
-      <div class="row">
+      <div class="row g-3">
         <div class="col-md-4"><input type="text" name="username" class="form-control bg-dark text-white" placeholder="Username" required></div>
         <div class="col-md-4"><input type="password" name="password" class="form-control bg-dark text-white" placeholder="Password" required></div>
         <div class="col-md-4 d-flex align-items-center">
-          <div class="form-check me-3"><input type="checkbox" name="is_super" class="form-check-input" id="superCheck"><label class="form-check-label" for="superCheck">Super Admin</label></div>
-          <button type="submit" class="btn-neon">Create Admin</button>
+          <div class="form-check me-3"><input type="checkbox" name="is_super" class="form-check-input" id="superCheck"><label class="form-check-label" for="superCheck" style="color:#fff;">Super Admin</label></div>
+          <button type="submit" class="btn-neon"><i class="fas fa-save me-1"></i>Create Admin</button>
         </div>
       </div>
-      <div class="mt-3"><label>Permissions:</label>
+      <div class="mt-3"><label style="color:#fff;"><i class="fas fa-lock me-1"></i>Permissions:</label>
         <div class="row">
-          <div class="col-md-2"><label><input type="checkbox" name="permissions" value="dashboard"> Dashboard</label></div>
-          <div class="col-md-2"><label><input type="checkbox" name="permissions" value="nodes"> Nodes</label></div>
-          <div class="col-md-2"><label><input type="checkbox" name="permissions" value="keys"> Keys</label></div>
-          <div class="col-md-2"><label><input type="checkbox" name="permissions" value="settings"> Settings</label></div>
-          <div class="col-md-2"><label><input type="checkbox" name="permissions" value="test_attack"> Test Attack</label></div>
-          <div class="col-md-2"><label><input type="checkbox" name="permissions" value="manage_admins"> Manage Admins</label></div>
+          <div class="col-md-2"><div class="form-check"><input type="checkbox" name="permissions" value="dashboard" class="form-check-input" id="permDashboard"><label class="form-check-label" for="permDashboard" style="color:#fff;"> Dashboard</label></div></div>
+          <div class="col-md-2"><div class="form-check"><input type="checkbox" name="permissions" value="nodes" class="form-check-input" id="permNodes"><label class="form-check-label" for="permNodes" style="color:#fff;"> Nodes</label></div></div>
+          <div class="col-md-2"><div class="form-check"><input type="checkbox" name="permissions" value="keys" class="form-check-input" id="permKeys"><label class="form-check-label" for="permKeys" style="color:#fff;"> Keys</label></div></div>
+          <div class="col-md-2"><div class="form-check"><input type="checkbox" name="permissions" value="settings" class="form-check-input" id="permSettings"><label class="form-check-label" for="permSettings" style="color:#fff;"> Settings</label></div></div>
+          <div class="col-md-2"><div class="form-check"><input type="checkbox" name="permissions" value="test_attack" class="form-check-input" id="permTest"><label class="form-check-label" for="permTest" style="color:#fff;"> Test Attack</label></div></div>
+          <div class="col-md-2"><div class="form-check"><input type="checkbox" name="permissions" value="manage_admins" class="form-check-input" id="permManage"><label class="form-check-label" for="permManage" style="color:#fff;"> Manage Admins</label></div></div>
         </div>
-        <small class="text-muted">Super Admins have all permissions automatically.</small>
+        <small class="text-muted"><i class="fas fa-info-circle"></i> Super Admins have all permissions automatically.</small>
       </div>
     </form>
   </div>
 </div>
 
 <!-- Existing Admins -->
-<h4>Existing Administrators</h4>
-<table class="table table-dark">
+<h4 style="color:#00ffcc;"><i class="fas fa-users me-2"></i>Existing Administrators</h4>
+<div class="table-responsive">
+<table class="table table-dark table-hover">
   <thead><tr><th>Username</th><th>Super Admin</th><th>Permissions</th><th>Created</th><th>Actions</th></tr></thead>
   <tbody>
   {% for admin in admins %}
   <tr>
-    <td>{{ admin.username }}</td>
-    <td>{% if admin.is_super %}👑 Yes{% else %}❌ No{% endif %}</td>
+    <td><i class="fas fa-user-circle me-1"></i>{{ admin.username }}</td>
+    <td>{% if admin.is_super %}<span class="badge bg-warning text-dark">👑 Yes</span>{% else %}<span class="badge bg-secondary">❌ No</span>{% endif %}</td>
     <td>{{ admin.permissions|join(', ') if admin.permissions else 'None' }}</td>
     <td>{{ admin.created_at.strftime('%Y-%m-%d') if admin.created_at else 'N/A' }}</td>
     <td>
-      <button class="btn btn-sm btn-warning" data-bs-toggle="modal" data-bs-target="#editModal{{ loop.index }}">Edit</button>
+      <button class="btn btn-sm btn-warning" data-bs-toggle="modal" data-bs-target="#editModal{{ loop.index }}"><i class="fas fa-edit"></i> Edit</button>
       <form method="POST" action="/admin/manage/delete/{{ admin._id if USE_MONGO else admin.id }}" style="display:inline" onsubmit="return confirm('Delete this admin?');">
-        <button class="btn btn-sm btn-danger">Delete</button>
+        <button class="btn btn-sm btn-danger"><i class="fas fa-trash"></i> Delete</button>
       </form>
     </td>
   </tr>
@@ -2033,26 +2050,27 @@ ADMIN_MANAGE_HTML = '''
   <div class="modal fade" id="editModal{{ loop.index }}" tabindex="-1">
     <div class="modal-dialog"><div class="modal-content bg-dark text-white">
       <form method="POST" action="/admin/manage/edit/{{ admin._id if USE_MONGO else admin.id }}">
-      <div class="modal-header"><h5>Edit {{ admin.username }}</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-header"><h5><i class="fas fa-user-edit me-2"></i>Edit {{ admin.username }}</h5><button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button></div>
       <div class="modal-body">
-        <div class="form-check mb-3"><input type="checkbox" name="is_super" class="form-check-input" {% if admin.is_super %}checked{% endif %}><label>Super Admin</label></div>
-        <label>Permissions:</label>
+        <div class="form-check mb-3"><input type="checkbox" name="is_super" class="form-check-input" id="editSuper{{ loop.index }}" {% if admin.is_super %}checked{% endif %}><label class="form-check-label" for="editSuper{{ loop.index }}">Super Admin</label></div>
+        <label><i class="fas fa-lock me-1"></i>Permissions:</label>
         <div class="row">
-          <div class="col-6"><label><input type="checkbox" name="permissions" value="dashboard" {% if 'dashboard' in admin.permissions %}checked{% endif %}> Dashboard</label></div>
-          <div class="col-6"><label><input type="checkbox" name="permissions" value="nodes" {% if 'nodes' in admin.permissions %}checked{% endif %}> Nodes</label></div>
-          <div class="col-6"><label><input type="checkbox" name="permissions" value="keys" {% if 'keys' in admin.permissions %}checked{% endif %}> Keys</label></div>
-          <div class="col-6"><label><input type="checkbox" name="permissions" value="settings" {% if 'settings' in admin.permissions %}checked{% endif %}> Settings</label></div>
-          <div class="col-6"><label><input type="checkbox" name="permissions" value="test_attack" {% if 'test_attack' in admin.permissions %}checked{% endif %}> Test Attack</label></div>
-          <div class="col-6"><label><input type="checkbox" name="permissions" value="manage_admins" {% if 'manage_admins' in admin.permissions %}checked{% endif %}> Manage Admins</label></div>
+          <div class="col-6"><div class="form-check"><input type="checkbox" name="permissions" value="dashboard" class="form-check-input" {% if 'dashboard' in admin.permissions %}checked{% endif %}> <label class="form-check-label">Dashboard</label></div></div>
+          <div class="col-6"><div class="form-check"><input type="checkbox" name="permissions" value="nodes" class="form-check-input" {% if 'nodes' in admin.permissions %}checked{% endif %}> <label class="form-check-label">Nodes</label></div></div>
+          <div class="col-6"><div class="form-check"><input type="checkbox" name="permissions" value="keys" class="form-check-input" {% if 'keys' in admin.permissions %}checked{% endif %}> <label class="form-check-label">Keys</label></div></div>
+          <div class="col-6"><div class="form-check"><input type="checkbox" name="permissions" value="settings" class="form-check-input" {% if 'settings' in admin.permissions %}checked{% endif %}> <label class="form-check-label">Settings</label></div></div>
+          <div class="col-6"><div class="form-check"><input type="checkbox" name="permissions" value="test_attack" class="form-check-input" {% if 'test_attack' in admin.permissions %}checked{% endif %}> <label class="form-check-label">Test Attack</label></div></div>
+          <div class="col-6"><div class="form-check"><input type="checkbox" name="permissions" value="manage_admins" class="form-check-input" {% if 'manage_admins' in admin.permissions %}checked{% endif %}> <label class="form-check-label">Manage Admins</label></div></div>
         </div>
       </div>
-      <div class="modal-footer"><button type="submit" class="btn-neon">Save</button></div>
+      <div class="modal-footer"><button type="submit" class="btn-neon">Save Changes</button></div>
       </form>
     </div></div>
   </div>
   {% endfor %}
   </tbody>
 </table>
+</div>
 </div></div>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body></html>
