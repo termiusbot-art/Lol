@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Inferno Stresser - Complete Web Panel
+Inferno Stresser - Complete Web Panel with Granular Admin Permissions
 """
 import os
 import socket
@@ -68,16 +68,25 @@ if MONGO_URL:
         USE_MONGO = True
         print("✅ MongoDB connected")
 
-        # Ensure admin_users collection exists and has at least one admin
+        # Ensure collections exist
         if 'admin_users' not in db.list_collection_names():
             db.create_collection('admin_users')
-        if db.admin_users.count_documents({}) == 0:
-            db.admin_users.insert_one({
-                "username": "admin",
-                "password_hash": generate_password_hash("admin123"),
-                "created_at": datetime.utcnow()
-            })
-            print("✅ Default admin created in MongoDB (admin / admin123)")
+        if 'users' not in db.list_collection_names():
+            db.create_collection('users')
+        if 'attack_nodes' not in db.list_collection_names():
+            db.create_collection('attack_nodes')
+        if 'attack_logs' not in db.list_collection_names():
+            db.create_collection('attack_logs')
+        if 'generated_keys' not in db.list_collection_names():
+            db.create_collection('generated_keys')
+        if 'api_keys' not in db.list_collection_names():
+            db.create_collection('api_keys')
+
+        # Upgrade existing admin documents to include permissions/super fields if missing
+        admin_users_col.update_many(
+            {"is_super": {"$exists": False}},
+            {"$set": {"is_super": True, "permissions": []}}
+        )
     except Exception as e:
         print(f"❌ MongoDB error: {e} – falling back to SQLite")
         USE_MONGO = False
@@ -161,6 +170,8 @@ else:
         username = db_sql.Column(db_sql.String(80), unique=True, nullable=False)
         password_hash = db_sql.Column(db_sql.String(200), nullable=False)
         created_at = db_sql.Column(db_sql.DateTime, default=datetime.utcnow)
+        permissions = db_sql.Column(db_sql.Text, default="[]")
+        is_super = db_sql.Column(db_sql.Boolean, default=False)
 
     class GeneratedKey(db_sql.Model):
         id = db_sql.Column(db_sql.Integer, primary_key=True)
@@ -175,11 +186,7 @@ else:
 
     with app.app_context():
         db_sql.create_all()
-        if not AdminUser.query.first():
-            admin = AdminUser(username='admin', password_hash=generate_password_hash('admin123'))
-            db_sql.session.add(admin)
-            db_sql.session.commit()
-            print("SQLite: default admin created (admin/admin123)")
+        # No default admin creation – you already have your admin in MongoDB
         if not User.query.first():
             default_token = secrets.token_urlsafe(32)
             user = User(token=default_token, plan="Free Plan", max_concurrent=1, max_duration=60, max_threads=1500, role="user")
@@ -208,14 +215,22 @@ def get_user_by_token(token):
     else:
         return User.query.filter_by(token=token).first()
 
-def admin_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if 'admin_logged_in' not in session or not session['admin_logged_in']:
-            flash('Please login as admin first', 'danger')
-            return redirect(url_for('admin_login'))
-        return f(*args, **kwargs)
-    return decorated_function
+def admin_required(permission=None):
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            if not session.get('admin_logged_in'):
+                flash('Please login as admin first', 'danger')
+                return redirect(url_for('admin_login'))
+            if permission:
+                admin_perms = session.get('admin_permissions', [])
+                is_super = session.get('admin_is_super', False)
+                if not is_super and permission not in admin_perms:
+                    flash('You do not have permission to access this page.', 'danger')
+                    return redirect(url_for('admin_dashboard'))
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
 
 def can_user_attack(user):
     role = user.get('role') if USE_MONGO else user.role
@@ -746,13 +761,20 @@ def admin_login():
             if admin and check_password_hash(admin['password_hash'], password):
                 session['admin_logged_in'] = True
                 session['admin_username'] = username
+                session['admin_id'] = str(admin['_id'])
+                session['admin_permissions'] = admin.get('permissions', [])
+                session['admin_is_super'] = admin.get('is_super', False)
+                flash('Welcome!', 'success')
                 return redirect(url_for('admin_dashboard'))
         else:
             admin = AdminUser.query.filter_by(username=username).first()
             if admin and check_password_hash(admin.password_hash, password):
                 session['admin_logged_in'] = True
                 session['admin_username'] = username
-                session['admin_user_id'] = admin.id
+                session['admin_id'] = admin.id
+                session['admin_permissions'] = json.loads(admin.permissions) if admin.permissions else []
+                session['admin_is_super'] = admin.is_super
+                flash('Welcome!', 'success')
                 return redirect(url_for('admin_dashboard'))
         flash('Invalid credentials', 'danger')
     return render_template_string(ADMIN_LOGIN_HTML)
@@ -763,7 +785,7 @@ def admin_logout():
     return redirect(url_for('admin_login'))
 
 @app.route('/admin/dashboard')
-@admin_required
+@admin_required('dashboard')
 def admin_dashboard():
     if USE_MONGO:
         total_users = users_col.count_documents({})
@@ -777,13 +799,14 @@ def admin_dashboard():
         total_nodes = AttackNode.query.count()
         active_nodes = AttackNode.query.filter_by(enabled=True, status_detail='active').count()
         total_keys = GeneratedKey.query.count()
+    can_manage = session.get('admin_is_super', False) or 'manage_admins' in session.get('admin_permissions', [])
     return render_template_string(ADMIN_DASHBOARD_ENHANCED_HTML,
                                   total_users=total_users, total_attacks=total_attacks,
                                   total_nodes=total_nodes, active_nodes=active_nodes,
-                                  total_keys=total_keys)
+                                  total_keys=total_keys, can_manage_admins=can_manage)
 
 @app.route('/admin/nodes')
-@admin_required
+@admin_required('nodes')
 def admin_nodes():
     if USE_MONGO:
         nodes = list(attack_nodes_col.find())
@@ -792,7 +815,7 @@ def admin_nodes():
     return render_template_string(ADMIN_NODES_HTML, nodes=nodes)
 
 @app.route('/admin/nodes/add_github', methods=['POST'])
-@admin_required
+@admin_required('nodes')
 def admin_add_github_node():
     name = request.form.get('name')
     token = request.form.get('github_token')
@@ -832,7 +855,7 @@ def admin_add_github_node():
     return redirect(url_for('admin_nodes'))
 
 @app.route('/admin/nodes/add_vps', methods=['POST'])
-@admin_required
+@admin_required('nodes')
 def admin_add_vps_node():
     name = request.form.get('name')
     host = request.form.get('vps_host')
@@ -870,7 +893,7 @@ def admin_add_vps_node():
     return redirect(url_for('admin_nodes'))
 
 @app.route('/admin/nodes/<node_id>/check', methods=['POST'])
-@admin_required
+@admin_required('nodes')
 def admin_check_node(node_id):
     if USE_MONGO:
         node = attack_nodes_col.find_one({"_id": ObjectId(node_id)})
@@ -885,7 +908,7 @@ def admin_check_node(node_id):
     return redirect(url_for('admin_nodes'))
 
 @app.route('/admin/nodes/<node_id>/toggle', methods=['POST'])
-@admin_required
+@admin_required('nodes')
 def admin_toggle_node(node_id):
     if USE_MONGO:
         node = attack_nodes_col.find_one({"_id": ObjectId(node_id)})
@@ -900,7 +923,7 @@ def admin_toggle_node(node_id):
     return redirect(url_for('admin_nodes'))
 
 @app.route('/admin/nodes/<node_id>/delete', methods=['POST'])
-@admin_required
+@admin_required('nodes')
 def admin_delete_node(node_id):
     if USE_MONGO:
         node = attack_nodes_col.find_one({"_id": ObjectId(node_id)})
@@ -919,7 +942,7 @@ def admin_delete_node(node_id):
     return redirect(url_for('admin_nodes'))
 
 @app.route('/admin/upload_binary', methods=['POST'])
-@admin_required
+@admin_required('nodes')
 def admin_upload_binary():
     if 'binary' not in request.files:
         flash('No file selected', 'danger')
@@ -997,7 +1020,7 @@ def admin_upload_binary():
     return redirect(url_for('admin_nodes'))
 
 @app.route('/admin/keys')
-@admin_required
+@admin_required('keys')
 def admin_keys():
     if USE_MONGO:
         keys = list(generated_keys_col.find().sort("created_at", -1))
@@ -1006,7 +1029,7 @@ def admin_keys():
     return render_template_string(ADMIN_KEYS_HTML, keys=keys, plans=PLANS)
 
 @app.route('/admin/keys/generate', methods=['POST'])
-@admin_required
+@admin_required('keys')
 def generate_keys():
     plan_name = request.form.get('plan', 'Pro Plan')
     days = int(request.form.get('days', 30))
@@ -1019,11 +1042,11 @@ def generate_keys():
         if USE_MONGO:
             generated_keys_col.insert_one({
                 "key": key_str, "plan": plan_name, "duration_days": days,
-                "created_by": session.get('admin_user_id'), "created_at": datetime.utcnow(),
+                "created_by": session.get('admin_id'), "created_at": datetime.utcnow(),
                 "active": True, "used_by": None
             })
         else:
-            key = GeneratedKey(key=key_str, plan=plan_name, duration_days=days, created_by=session['admin_user_id'])
+            key = GeneratedKey(key=key_str, plan=plan_name, duration_days=days, created_by=session['admin_id'])
             db_sql.session.add(key)
         keys_created.append(key_str)
     if not USE_MONGO:
@@ -1032,7 +1055,7 @@ def generate_keys():
     return redirect(url_for('admin_keys'))
 
 @app.route('/admin/keys/<key_id>/delete', methods=['POST'])
-@admin_required
+@admin_required('keys')
 def delete_key(key_id):
     if USE_MONGO:
         generated_keys_col.delete_one({"_id": ObjectId(key_id)})
@@ -1045,7 +1068,7 @@ def delete_key(key_id):
     return redirect(url_for('admin_keys'))
 
 @app.route('/admin/settings')
-@admin_required
+@admin_required('settings')
 def admin_settings():
     if USE_MONGO:
         stats = {
@@ -1074,7 +1097,7 @@ def admin_settings():
                                   stats=stats)
 
 @app.route('/admin/settings/update', methods=['POST'])
-@admin_required
+@admin_required('settings')
 def admin_settings_update():
     global MAINTENANCE_MODE, GLOBAL_COOLDOWN, MAX_ATTACK_DURATION, DEFAULT_THREADS, MAX_THREADS_LIMIT
     action = request.form.get('action')
@@ -1087,9 +1110,12 @@ def admin_settings_update():
             flash('Password must be at least 6 characters', 'danger')
         else:
             if USE_MONGO:
-                admin_users_col.update_one({"username": "admin"}, {"$set": {"password_hash": generate_password_hash(new_pass)}})
+                admin_users_col.update_one(
+                    {"_id": ObjectId(session['admin_id'])},
+                    {"$set": {"password_hash": generate_password_hash(new_pass)}}
+                )
             else:
-                admin = AdminUser.query.filter_by(username='admin').first()
+                admin = AdminUser.query.get(session['admin_id'])
                 if admin:
                     admin.password_hash = generate_password_hash(new_pass)
                     db_sql.session.commit()
@@ -1109,7 +1135,7 @@ def admin_settings_update():
     return redirect(url_for('admin_settings'))
 
 @app.route('/admin/settings/clear/<collection>', methods=['POST'])
-@admin_required
+@admin_required('settings')
 def admin_clear_collection(collection):
     if USE_MONGO:
         if collection == 'users':
@@ -1151,7 +1177,7 @@ def admin_clear_collection(collection):
     return redirect(url_for('admin_settings'))
 
 @app.route('/admin/test-attack', methods=['GET', 'POST'])
-@admin_required
+@admin_required('test_attack')
 def admin_test_attack():
     if request.method == 'POST':
         target = request.form.get('target')
@@ -1175,7 +1201,6 @@ def admin_test_attack():
         github_success = 0
         vps_success = 0
 
-        # Test GitHub nodes
         for node in github_nodes:
             node_name = node['name'] if USE_MONGO else node.name
             try:
@@ -1187,7 +1212,6 @@ def admin_test_attack():
             except Exception as e:
                 results.append({'name': node_name, 'type': 'GitHub', 'status': '❌ Error', 'details': str(e)[:50]})
 
-        # Test VPS nodes
         for node in vps_nodes:
             node_name = node['name'] if USE_MONGO else node.name
             try:
@@ -1207,15 +1231,14 @@ def admin_test_attack():
                                       github_success=github_success, vps_success=vps_success)
 
     return render_template_string(ADMIN_TEST_ATTACK_HTML, results=None)
-    
+
 @app.route('/admin/test-attack/single', methods=['POST'])
-@admin_required
+@admin_required('test_attack')
 def admin_test_single_node():
-    """Test a single node with safe defaults, returns JSON."""
     node_id = request.form.get('single_node')
     target = request.form.get('target', '127.0.0.1')
     port = int(request.form.get('port', 443))
-    duration = min(int(request.form.get('duration', 5)), 10)   # max 10s for safety
+    duration = min(int(request.form.get('duration', 5)), 10)
     method = request.form.get('method', 'udp')
     threads = int(request.form.get('threads', 500))
 
@@ -1243,9 +1266,95 @@ def admin_test_single_node():
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)[:100]})
 
+# ==================== ADMIN MANAGE ROUTES ====================
+@app.route('/admin/manage')
+@admin_required('manage_admins')
+def admin_manage():
+    if USE_MONGO:
+        admins = list(admin_users_col.find())
+    else:
+        admins = AdminUser.query.all()
+    can_manage = session.get('admin_is_super', False) or 'manage_admins' in session.get('admin_permissions', [])
+    return render_template_string(ADMIN_MANAGE_HTML, admins=admins, USE_MONGO=USE_MONGO, can_manage_admins=can_manage)
+
+@app.route('/admin/manage/add', methods=['POST'])
+@admin_required('manage_admins')
+def admin_manage_add():
+    username = request.form.get('username')
+    password = request.form.get('password')
+    is_super = request.form.get('is_super') == 'on'
+    permissions = request.form.getlist('permissions')
+
+    if not username or not password:
+        flash('Username and password required', 'danger')
+        return redirect(url_for('admin_manage'))
+
+    if USE_MONGO:
+        if admin_users_col.find_one({"username": username}):
+            flash('Username already exists', 'danger')
+            return redirect(url_for('admin_manage'))
+        admin_users_col.insert_one({
+            "username": username,
+            "password_hash": generate_password_hash(password),
+            "permissions": permissions,
+            "is_super": is_super,
+            "created_at": datetime.utcnow()
+        })
+    else:
+        if AdminUser.query.filter_by(username=username).first():
+            flash('Username already exists', 'danger')
+            return redirect(url_for('admin_manage'))
+        admin = AdminUser(
+            username=username,
+            password_hash=generate_password_hash(password),
+            permissions=json.dumps(permissions),
+            is_super=is_super
+        )
+        db_sql.session.add(admin)
+        db_sql.session.commit()
+    flash(f'Admin {username} created', 'success')
+    return redirect(url_for('admin_manage'))
+
+@app.route('/admin/manage/edit/<admin_id>', methods=['POST'])
+@admin_required('manage_admins')
+def admin_manage_edit(admin_id):
+    is_super = request.form.get('is_super') == 'on'
+    permissions = request.form.getlist('permissions')
+
+    if USE_MONGO:
+        admin_users_col.update_one(
+            {"_id": ObjectId(admin_id)},
+            {"$set": {"permissions": permissions, "is_super": is_super}}
+        )
+    else:
+        admin = AdminUser.query.get(admin_id)
+        if admin:
+            admin.permissions = json.dumps(permissions)
+            admin.is_super = is_super
+            db_sql.session.commit()
+    flash('Admin updated', 'success')
+    return redirect(url_for('admin_manage'))
+
+@app.route('/admin/manage/delete/<admin_id>', methods=['POST'])
+@admin_required('manage_admins')
+def admin_manage_delete(admin_id):
+    if (USE_MONGO and str(admin_id) == session.get('admin_id')) or (not USE_MONGO and int(admin_id) == session.get('admin_id')):
+        flash('You cannot delete your own account', 'danger')
+        return redirect(url_for('admin_manage'))
+
+    if USE_MONGO:
+        admin_users_col.delete_one({"_id": ObjectId(admin_id)})
+    else:
+        admin = AdminUser.query.get(admin_id)
+        if admin:
+            db_sql.session.delete(admin)
+            db_sql.session.commit()
+    flash('Admin deleted', 'success')
+    return redirect(url_for('admin_manage'))
+
 # ==================== LIVE STATUS APIs ====================
 @app.route('/admin/nodes/status/all')
-@admin_required
+@admin_required('dashboard')
 def admin_nodes_status_all():
     if USE_MONGO:
         nodes = list(attack_nodes_col.find())
@@ -1268,7 +1377,7 @@ def admin_nodes_status_all():
     return jsonify(result)
 
 @app.route('/admin/nodes/<node_id>/test', methods=['POST'])
-@admin_required
+@admin_required('nodes')
 def admin_test_node_ajax(node_id):
     if USE_MONGO:
         node = attack_nodes_col.find_one({"_id": ObjectId(node_id)})
@@ -1283,7 +1392,7 @@ def admin_test_node_ajax(node_id):
     return jsonify(result)
 
 @app.route('/admin/attack/status')
-@admin_required
+@admin_required('dashboard')
 def admin_attack_status():
     with attack_lock:
         queue_len = len(attack_queue)
@@ -1291,7 +1400,7 @@ def admin_attack_status():
     return jsonify({'is_attacking': is_attacking, 'queue_length': queue_len, 'current_attack': cur})
 
 @app.route('/admin/attack/stop', methods=['POST'])
-@admin_required
+@admin_required('dashboard')
 def admin_stop_attack():
     global is_attacking, current_attack
     with attack_lock:
@@ -1300,6 +1409,7 @@ def admin_stop_attack():
         current_attack = None
     flash('Attack queue cleared', 'success')
     return redirect(url_for('admin_dashboard'))
+
 
 LOGIN_HTML = '''
 <!DOCTYPE html>
@@ -1559,11 +1669,16 @@ body{background:radial-gradient(circle at 10% 20%, #0a0a1a, #000);font-family:'I
 </style></head>
 <body><div class="container-fluid">
 <div class="d-flex justify-content-between align-items-center mb-4"><h2><i class="fas fa-shield-alt me-2" style="color:var(--neon);"></i>Admin Dashboard</h2>
-<div><a href="/admin/nodes" class="btn btn-outline-info me-2"><i class="fas fa-server"></i> Nodes</a>
-<a href="/admin/keys" class="btn btn-outline-warning me-2"><i class="fas fa-key"></i> Keys</a>
-<a href="/admin/settings" class="btn btn-outline-secondary me-2"><i class="fas fa-cog"></i> Settings</a>
-<a href="/admin/test-attack" class="btn btn-outline-warning me-2"><i class="fas fa-flask"></i> Test Attack</a>
-<a href="/admin/logout" class="btn btn-outline-danger"><i class="fas fa-sign-out-alt"></i> Logout</a></div></div>
+<div>
+    <a href="/admin/nodes" class="btn btn-outline-info me-2"><i class="fas fa-server"></i> Nodes</a>
+    <a href="/admin/keys" class="btn btn-outline-warning me-2"><i class="fas fa-key"></i> Keys</a>
+    <a href="/admin/settings" class="btn btn-outline-secondary me-2"><i class="fas fa-cog"></i> Settings</a>
+    <a href="/admin/test-attack" class="btn btn-outline-warning me-2"><i class="fas fa-flask"></i> Test Attack</a>
+    {% if can_manage_admins %}
+    <a href="/admin/manage" class="btn btn-outline-light me-2"><i class="fas fa-user-shield"></i> Manage Admins</a>
+    {% endif %}
+    <a href="/admin/logout" class="btn btn-outline-danger"><i class="fas fa-sign-out-alt"></i> Logout</a>
+</div></div>
 <div class="glass-card"><h5><i class="fas fa-bolt me-2"></i>Attack Status <span id="attackStatusBadge" class="badge bg-secondary">Loading...</span></h5><div id="attackDetails" class="mt-2"></div></div>
 <div class="row g-4 mb-4">
 <div class="col-md-3"><div class="glass-card stat-card"><div class="stat-number">{{ total_users }}</div><div>Total Users</div></div></div>
@@ -1846,6 +1961,95 @@ document.addEventListener('DOMContentLoaded', loadNodes);
 </script>
 </body></html>
 '''
+
+ADMIN_MANAGE_HTML = '''
+<!DOCTYPE html>
+<html><head><title>Manage Admins • STRESSER</title><meta name="viewport" content="width=device-width, initial-scale=1">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<style>body{background:#0a0a1a;color:#fff;padding:20px;}.glass-card{background:rgba(15,25,45,0.45);border-radius:24px;padding:20px;margin-bottom:20px;}
+.btn-neon{background:linear-gradient(90deg,#00b377,#00cc88);border:none;border-radius:40px;padding:8px 20px;font-weight:bold;color:#000;}
+.btn-danger{background:#ff3355;border:none;color:#fff;}.btn-warning{background:#ffaa00;color:#000;}</style>
+</head>
+<body><div class="container">
+<div class="glass-card"><h2><i class="fas fa-user-shield me-2"></i>Manage Administrators</h2>
+<a href="/admin/dashboard" class="btn btn-secondary mb-3">← Back</a>
+
+<!-- Add New Admin -->
+<div class="card bg-dark mb-4">
+  <div class="card-header">➕ Create New Admin</div>
+  <div class="card-body">
+    <form method="POST" action="/admin/manage/add">
+      <div class="row">
+        <div class="col-md-4"><input type="text" name="username" class="form-control bg-dark text-white" placeholder="Username" required></div>
+        <div class="col-md-4"><input type="password" name="password" class="form-control bg-dark text-white" placeholder="Password" required></div>
+        <div class="col-md-4 d-flex align-items-center">
+          <div class="form-check me-3"><input type="checkbox" name="is_super" class="form-check-input" id="superCheck"><label class="form-check-label" for="superCheck">Super Admin</label></div>
+          <button type="submit" class="btn-neon">Create Admin</button>
+        </div>
+      </div>
+      <div class="mt-3"><label>Permissions:</label>
+        <div class="row">
+          <div class="col-md-2"><label><input type="checkbox" name="permissions" value="dashboard"> Dashboard</label></div>
+          <div class="col-md-2"><label><input type="checkbox" name="permissions" value="nodes"> Nodes</label></div>
+          <div class="col-md-2"><label><input type="checkbox" name="permissions" value="keys"> Keys</label></div>
+          <div class="col-md-2"><label><input type="checkbox" name="permissions" value="settings"> Settings</label></div>
+          <div class="col-md-2"><label><input type="checkbox" name="permissions" value="test_attack"> Test Attack</label></div>
+          <div class="col-md-2"><label><input type="checkbox" name="permissions" value="manage_admins"> Manage Admins</label></div>
+        </div>
+        <small class="text-muted">Super Admins have all permissions automatically.</small>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Existing Admins -->
+<h4>Existing Administrators</h4>
+<table class="table table-dark">
+  <thead><tr><th>Username</th><th>Super Admin</th><th>Permissions</th><th>Created</th><th>Actions</th></tr></thead>
+  <tbody>
+  {% for admin in admins %}
+  <tr>
+    <td>{{ admin.username }}</td>
+    <td>{% if admin.is_super %}👑 Yes{% else %}❌ No{% endif %}</td>
+    <td>{{ admin.permissions|join(', ') if admin.permissions else 'None' }}</td>
+    <td>{{ admin.created_at.strftime('%Y-%m-%d') if admin.created_at else 'N/A' }}</td>
+    <td>
+      <button class="btn btn-sm btn-warning" data-bs-toggle="modal" data-bs-target="#editModal{{ loop.index }}">Edit</button>
+      <form method="POST" action="/admin/manage/delete/{{ admin._id if USE_MONGO else admin.id }}" style="display:inline" onsubmit="return confirm('Delete this admin?');">
+        <button class="btn btn-sm btn-danger">Delete</button>
+      </form>
+    </td>
+  </tr>
+  <!-- Edit Modal -->
+  <div class="modal fade" id="editModal{{ loop.index }}" tabindex="-1">
+    <div class="modal-dialog"><div class="modal-content bg-dark text-white">
+      <form method="POST" action="/admin/manage/edit/{{ admin._id if USE_MONGO else admin.id }}">
+      <div class="modal-header"><h5>Edit {{ admin.username }}</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+      <div class="modal-body">
+        <div class="form-check mb-3"><input type="checkbox" name="is_super" class="form-check-input" {% if admin.is_super %}checked{% endif %}><label>Super Admin</label></div>
+        <label>Permissions:</label>
+        <div class="row">
+          <div class="col-6"><label><input type="checkbox" name="permissions" value="dashboard" {% if 'dashboard' in admin.permissions %}checked{% endif %}> Dashboard</label></div>
+          <div class="col-6"><label><input type="checkbox" name="permissions" value="nodes" {% if 'nodes' in admin.permissions %}checked{% endif %}> Nodes</label></div>
+          <div class="col-6"><label><input type="checkbox" name="permissions" value="keys" {% if 'keys' in admin.permissions %}checked{% endif %}> Keys</label></div>
+          <div class="col-6"><label><input type="checkbox" name="permissions" value="settings" {% if 'settings' in admin.permissions %}checked{% endif %}> Settings</label></div>
+          <div class="col-6"><label><input type="checkbox" name="permissions" value="test_attack" {% if 'test_attack' in admin.permissions %}checked{% endif %}> Test Attack</label></div>
+          <div class="col-6"><label><input type="checkbox" name="permissions" value="manage_admins" {% if 'manage_admins' in admin.permissions %}checked{% endif %}> Manage Admins</label></div>
+        </div>
+      </div>
+      <div class="modal-footer"><button type="submit" class="btn-neon">Save</button></div>
+      </form>
+    </div></div>
+  </div>
+  {% endfor %}
+  </tbody>
+</table>
+</div></div>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body></html>
+'''
+
 # ==================== RUN ====================
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 8080)), debug=False)
