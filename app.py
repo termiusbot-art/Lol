@@ -68,25 +68,37 @@ if MONGO_URL:
         USE_MONGO = True
         print("✅ MongoDB connected")
 
-        # Ensure collections exist
-        if 'admin_users' not in db.list_collection_names():
-            db.create_collection('admin_users')
-        if 'users' not in db.list_collection_names():
-            db.create_collection('users')
-        if 'attack_nodes' not in db.list_collection_names():
-            db.create_collection('attack_nodes')
-        if 'attack_logs' not in db.list_collection_names():
-            db.create_collection('attack_logs')
-        if 'generated_keys' not in db.list_collection_names():
-            db.create_collection('generated_keys')
-        if 'api_keys' not in db.list_collection_names():
-            db.create_collection('api_keys')
+        # Assign collections FIRST
+        users_col = db['users']
+        api_keys_col = db['api_keys']
+        attack_logs_col = db['attack_logs']
+        attack_nodes_col = db['attack_nodes']
+        admin_users_col = db['admin_users']
+        generated_keys_col = db['generated_keys']
+
+        # Ensure collections exist (explicitly create if missing)
+        for coll_name in ['users', 'api_keys', 'attack_logs', 'attack_nodes', 'admin_users', 'generated_keys']:
+            if coll_name not in db.list_collection_names():
+                db.create_collection(coll_name)
 
         # Upgrade existing admin documents to include permissions/super fields if missing
         admin_users_col.update_many(
             {"is_super": {"$exists": False}},
             {"$set": {"is_super": True, "permissions": []}}
         )
+
+        # Optional: create a default super admin if the collection is completely empty
+        # (Comment out if you prefer to add admins manually via the panel)
+        if admin_users_col.count_documents({}) == 0:
+            admin_users_col.insert_one({
+                "username": "admin",
+                "password_hash": generate_password_hash("admin123"),
+                "permissions": [],
+                "is_super": True,
+                "created_at": datetime.utcnow()
+            })
+            print("Default super admin created (admin / admin123)")
+
     except Exception as e:
         print(f"❌ MongoDB error: {e} – falling back to SQLite")
         USE_MONGO = False
@@ -94,12 +106,8 @@ else:
     print("⚠️ MONGO_URL not set – using SQLite")
 
 if USE_MONGO:
-    users_col = db['users']
-    api_keys_col = db['api_keys']
-    attack_logs_col = db['attack_logs']
-    attack_nodes_col = db['attack_nodes']
-    admin_users_col = db['admin_users']
-    generated_keys_col = db['generated_keys']
+    # Collections are already assigned above; nothing else needed here
+    pass
 else:
     app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///stresser.db'
     app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
