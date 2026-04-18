@@ -1987,6 +1987,7 @@ ADMIN_MANAGE_HTML = '''
     .form-check-label { color: #ccd6f0; }
     .card-header { color: #fff; font-weight: 600; }
     small { color: #8899aa !important; }
+    .text-muted { color: #a0b3cc !important; opacity: 0.9; }
     .modal-content { background: #0a0a1a; color: #fff; }
     .table { color: #fff; }
     .btn-close { filter: invert(1); }
