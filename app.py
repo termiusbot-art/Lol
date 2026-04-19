@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-Inferno Stresser - Complete Web Panel with Granular Admin Permissions
+Inferno Stresser - Complete Web Panel
+Features: User/Admin auth, Attack Hub, Plans, Key Redemption, Admin Dashboard,
+Node Management (GitHub/VPS), Key Management, Settings, Test Attack Lab,
+Manage Admins (granular permissions), API Key Management, API Attack Endpoint.
 """
 import os
 import socket
@@ -68,7 +71,7 @@ if MONGO_URL:
         USE_MONGO = True
         print("✅ MongoDB connected")
 
-        # Assign collections FIRST
+        # Assign collections
         users_col = db['users']
         api_keys_col = db['api_keys']
         attack_logs_col = db['attack_logs']
@@ -76,19 +79,18 @@ if MONGO_URL:
         admin_users_col = db['admin_users']
         generated_keys_col = db['generated_keys']
 
-        # Ensure collections exist (explicitly create if missing)
-        for coll_name in ['users', 'api_keys', 'attack_logs', 'attack_nodes', 'admin_users', 'generated_keys']:
-            if coll_name not in db.list_collection_names():
-                db.create_collection(coll_name)
+        # Ensure collections exist
+        for coll in ['users', 'api_keys', 'attack_logs', 'attack_nodes', 'admin_users', 'generated_keys']:
+            if coll not in db.list_collection_names():
+                db.create_collection(coll)
 
-        # Upgrade existing admin documents to include permissions/super fields if missing
+        # Upgrade existing admin docs
         admin_users_col.update_many(
             {"is_super": {"$exists": False}},
             {"$set": {"is_super": True, "permissions": []}}
         )
 
-        # Optional: create a default super admin if the collection is completely empty
-        # (Comment out if you prefer to add admins manually via the panel)
+        # Create default super admin if none
         if admin_users_col.count_documents({}) == 0:
             admin_users_col.insert_one({
                 "username": "admin",
@@ -106,7 +108,7 @@ else:
     print("⚠️ MONGO_URL not set – using SQLite")
 
 if USE_MONGO:
-    # Collections are already assigned above; nothing else needed here
+    # Already assigned
     pass
 else:
     app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///stresser.db'
@@ -133,8 +135,14 @@ else:
         user_id = db_sql.Column(db_sql.Integer, db_sql.ForeignKey('user.id'))
         key = db_sql.Column(db_sql.String(64), unique=True, nullable=False)
         name = db_sql.Column(db_sql.String(100), default="Default")
-        whitelist_ips = db_sql.Column(db_sql.Text, default="")
+        plan_name = db_sql.Column(db_sql.String(50), nullable=True)
+        max_concurrent = db_sql.Column(db_sql.Integer, nullable=True)
+        max_duration = db_sql.Column(db_sql.Integer, nullable=True)
+        max_threads = db_sql.Column(db_sql.Integer, nullable=True)
         expires_at = db_sql.Column(db_sql.DateTime, nullable=True)
+        active = db_sql.Column(db_sql.Boolean, default=True)
+        last_used = db_sql.Column(db_sql.DateTime, nullable=True)
+        total_attacks = db_sql.Column(db_sql.Integer, default=0)
         created_at = db_sql.Column(db_sql.DateTime, default=datetime.utcnow)
 
     class AttackLog(db_sql.Model):
@@ -194,7 +202,6 @@ else:
 
     with app.app_context():
         db_sql.create_all()
-        # No default admin creation – you already have your admin in MongoDB
         if not User.query.first():
             default_token = secrets.token_urlsafe(32)
             user = User(token=default_token, plan="Free Plan", max_concurrent=1, max_duration=60, max_threads=1500, role="user")
@@ -516,7 +523,7 @@ def test_vps_node_detailed(node):
         result['status'] = 'dead'
         result['message'] = str(e)
     return result
-    
+
 # ==================== USER ROUTES ====================
 @app.route('/')
 def index():
@@ -1360,6 +1367,226 @@ def admin_manage_delete(admin_id):
     flash('Admin deleted', 'success')
     return redirect(url_for('admin_manage'))
 
+# ==================== API KEY MANAGEMENT ROUTES ====================
+@app.route('/admin/api_keys')
+@admin_required('keys')
+def admin_api_keys():
+    if USE_MONGO:
+        keys = list(api_keys_col.find())
+        user_map = {}
+        for k in keys:
+            uid = k.get('user_id')
+            if uid:
+                user = users_col.find_one({"_id": uid})
+                user_map[str(uid)] = user['token'][:16] + '...' if user else 'Unknown'
+    else:
+        keys = ApiKey.query.order_by(ApiKey.created_at.desc()).all()
+        user_map = {k.user_id: (User.query.get(k.user_id).token[:16] + '...' if k.user_id and User.query.get(k.user_id) else 'N/A') for k in keys}
+    return render_template_string(ADMIN_API_KEYS_HTML, keys=keys, plans=PLANS, user_map=user_map, USE_MONGO=USE_MONGO)
+
+@app.route('/admin/api_keys/create', methods=['POST'])
+@admin_required('keys')
+def admin_create_api_key():
+    user_id = request.form.get('user_id')
+    name = request.form.get('name', 'API Key')
+    plan_name = request.form.get('plan_name')
+    custom_concurrent = request.form.get('custom_concurrent')
+    custom_duration = request.form.get('custom_duration')
+    custom_threads = request.form.get('custom_threads')
+    expires_days = request.form.get('expires_days')
+
+    if not user_id:
+        flash('User ID is required', 'danger')
+        return redirect(url_for('admin_api_keys'))
+
+    max_concurrent = None
+    max_duration = None
+    max_threads = None
+    if plan_name and plan_name != 'custom':
+        plan = next((p for p in PLANS if p['name'] == plan_name), None)
+        if plan:
+            max_concurrent = plan['concurrent']
+            max_duration = plan['duration']
+            max_threads = plan['threads']
+    else:
+        max_concurrent = int(custom_concurrent) if custom_concurrent else None
+        max_duration = int(custom_duration) if custom_duration else None
+        max_threads = int(custom_threads) if custom_threads else None
+
+    expires_at = None
+    if expires_days and expires_days.isdigit():
+        expires_at = datetime.utcnow() + timedelta(days=int(expires_days))
+
+    new_key = secrets.token_urlsafe(32)
+
+    if USE_MONGO:
+        api_keys_col.insert_one({
+            "user_id": ObjectId(user_id),
+            "key": new_key,
+            "name": name,
+            "plan_name": plan_name if plan_name != 'custom' else None,
+            "max_concurrent": max_concurrent,
+            "max_duration": max_duration,
+            "max_threads": max_threads,
+            "expires_at": expires_at,
+            "active": True,
+            "last_used": None,
+            "total_attacks": 0,
+            "created_at": datetime.utcnow()
+        })
+    else:
+        api_key = ApiKey(
+            user_id=int(user_id),
+            key=new_key,
+            name=name,
+            plan_name=plan_name if plan_name != 'custom' else None,
+            max_concurrent=max_concurrent,
+            max_duration=max_duration,
+            max_threads=max_threads,
+            expires_at=expires_at,
+            active=True
+        )
+        db_sql.session.add(api_key)
+        db_sql.session.commit()
+
+    flash(f'API Key created! Copy it now: {new_key}', 'success')
+    return redirect(url_for('admin_api_keys'))
+
+@app.route('/admin/api_keys/<key_id>/delete', methods=['POST'])
+@admin_required('keys')
+def admin_delete_api_key(key_id):
+    if USE_MONGO:
+        api_keys_col.delete_one({"_id": ObjectId(key_id)})
+    else:
+        key = ApiKey.query.get(key_id)
+        if key:
+            db_sql.session.delete(key)
+            db_sql.session.commit()
+    flash('API Key deleted', 'success')
+    return redirect(url_for('admin_api_keys'))
+
+@app.route('/admin/api_keys/<key_id>/toggle', methods=['POST'])
+@admin_required('keys')
+def admin_toggle_api_key(key_id):
+    if USE_MONGO:
+        key = api_keys_col.find_one({"_id": ObjectId(key_id)})
+        if key:
+            api_keys_col.update_one({"_id": ObjectId(key_id)}, {"$set": {"active": not key.get('active', True)}})
+    else:
+        key = ApiKey.query.get(key_id)
+        if key:
+            key.active = not key.active
+            db_sql.session.commit()
+    flash('API Key toggled', 'success')
+    return redirect(url_for('admin_api_keys'))
+
+# ==================== API ATTACK ENDPOINT ====================
+@app.route('/api/attack', methods=['POST'])
+def api_attack():
+    data = request.get_json()
+    if not data:
+        return jsonify({'error': 'Invalid JSON'}), 400
+
+    api_key = data.get('api_key')
+    target = data.get('target')
+    port = data.get('port')
+    duration = data.get('duration')
+    method = data.get('method', 'udp')
+    threads = data.get('threads', DEFAULT_THREADS)
+    concurrent = data.get('concurrent', 1)
+
+    if not all([api_key, target, port, duration]):
+        return jsonify({'error': 'Missing parameters'}), 400
+
+    if USE_MONGO:
+        key_obj = api_keys_col.find_one({"key": api_key})
+    else:
+        key_obj = ApiKey.query.filter_by(key=api_key).first()
+
+    if not key_obj:
+        return jsonify({'error': 'Invalid API key'}), 401
+
+    if not key_obj.get('active', True):
+        return jsonify({'error': 'API key is inactive'}), 403
+
+    expires = key_obj.get('expires_at')
+    if expires and expires < datetime.utcnow():
+        return jsonify({'error': 'API key expired'}), 403
+
+    user_id = key_obj.get('user_id')
+    if USE_MONGO:
+        user = users_col.find_one({"_id": user_id})
+    else:
+        user = User.query.get(user_id)
+
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+
+    if key_obj.get('max_duration') is not None:
+        max_dur = key_obj['max_duration']
+    else:
+        max_dur = user.get('max_duration', 60) if USE_MONGO else user.max_duration
+
+    if key_obj.get('max_concurrent') is not None:
+        max_conc = key_obj['max_concurrent']
+    else:
+        max_conc = user.get('max_concurrent', 1) if USE_MONGO else user.max_concurrent
+
+    if key_obj.get('max_threads') is not None:
+        max_thr = key_obj['max_threads']
+    else:
+        max_thr = user.get('max_threads', 1500) if USE_MONGO else user.max_threads
+
+    if duration > max_dur:
+        return jsonify({'error': f'Max duration {max_dur}s'}), 400
+    if threads > max_thr:
+        return jsonify({'error': f'Max threads {max_thr}'}), 400
+    if concurrent > max_conc:
+        return jsonify({'error': f'Max concurrent {max_conc}'}), 400
+
+    slots_used = user.get('slots_used', 0) if USE_MONGO else user.slots_used
+    if slots_used + concurrent > max_conc:
+        return jsonify({'error': 'No free slots'}), 429
+
+    with attack_lock:
+        attack_queue.append({
+            'user_id': user_id,
+            'target': target,
+            'port': port,
+            'duration': duration,
+            'method': method,
+            'threads': threads,
+            'concurrent': concurrent,
+            'source': 'api'
+        })
+        global is_attacking
+        if not is_attacking:
+            is_attacking = True
+            threading.Thread(target=process_attack_queue).start()
+
+    if USE_MONGO:
+        users_col.update_one(
+            {"_id": user_id},
+            {"$set": {"last_attack": datetime.utcnow()}, "$inc": {"slots_used": concurrent}}
+        )
+        api_keys_col.update_one(
+            {"_id": key_obj['_id']},
+            {"$set": {"last_used": datetime.utcnow()}, "$inc": {"total_attacks": 1}}
+        )
+    else:
+        user.last_attack = datetime.utcnow()
+        user.slots_used += concurrent
+        key_obj.last_used = datetime.utcnow()
+        key_obj.total_attacks += 1
+        db_sql.session.commit()
+
+    return jsonify({
+        'status': 'queued',
+        'position': len(attack_queue),
+        'duration': duration,
+        'endsAt': (datetime.utcnow() + timedelta(seconds=duration)).isoformat()
+    }), 200
+
 # ==================== LIVE STATUS APIs ====================
 @app.route('/admin/nodes/status/all')
 @admin_required('dashboard')
@@ -1418,6 +1645,8 @@ def admin_stop_attack():
     flash('Attack queue cleared', 'success')
     return redirect(url_for('admin_dashboard'))
 
+# ==================== HTML TEMPLATES ====================
+# ==================== ALL HTML TEMPLATES ====================
 
 LOGIN_HTML = '''
 <!DOCTYPE html>
@@ -1680,6 +1909,7 @@ body{background:radial-gradient(circle at 10% 20%, #0a0a1a, #000);font-family:'I
 <div>
     <a href="/admin/nodes" class="btn btn-outline-info me-2"><i class="fas fa-server"></i> Nodes</a>
     <a href="/admin/keys" class="btn btn-outline-warning me-2"><i class="fas fa-key"></i> Keys</a>
+    <a href="/admin/api_keys" class="btn btn-outline-info me-2"><i class="fas fa-key"></i> API Keys</a>
     <a href="/admin/settings" class="btn btn-outline-secondary me-2"><i class="fas fa-cog"></i> Settings</a>
     <a href="/admin/test-attack" class="btn btn-outline-warning me-2"><i class="fas fa-flask"></i> Test Attack</a>
     {% if can_manage_admins %}
@@ -1817,7 +2047,7 @@ ADMIN_SETTINGS_HTML = '''
       <tr><td>API Keys</td><td>{{ stats.api_keys }}</td><td><form method="POST" action="/admin/settings/clear/api_keys" onsubmit="return confirm('Clear all API keys?')"><button class="btn btn-sm btn-danger">Clear</button></form></td></tr>
       <tr><td>Attack Logs</td><td>{{ stats.attack_logs }}</td><td><form method="POST" action="/admin/settings/clear/attack_logs" onsubmit="return confirm('Clear all attack logs?')"><button class="btn btn-sm btn-warning">Clear</button></form></td></tr>
       <tr><td>Attack Nodes</td><td>{{ stats.attack_nodes }}</td><td><form method="POST" action="/admin/settings/clear/attack_nodes" onsubmit="return confirm('Clear all nodes?')"><button class="btn btn-sm btn-danger">Clear</button></form></td></tr>
-      <tr><td>Generated Keys</td><td>{{ stats.generated_keys }}</td><td><form method="POST" action="/admin/settings/clear/generated_keys" onsubmit="return confirm('Clear all keys?')"><button class="btn btn-sm btn-danger">Clear</button></form></td></tr>
+      <tr><td>Generated Keys</td><td>{{ stats.generated_keys }}</td><td><form method="POST" action="/admin/settings/clear/generated_keys" onsubmit="return confirm('Clear all keys?')"><button class="btn btn-sm btn75">Clear</button></form></td></tr>
     </table>
     <p>Total Database Size: {{ (stats.db_size / 1024 / 1024)|round(2) }} MB</p>
   </div>
@@ -2078,6 +2308,76 @@ ADMIN_MANAGE_HTML = '''
   </tbody>
 </table>
 </div></div>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+</body></html>
+'''
+
+ADMIN_API_KEYS_HTML = '''
+<!DOCTYPE html>
+<html><head><title>API Keys • STRESSER</title><meta name="viewport" content="width=device-width, initial-scale=1">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<style>
+    body { background: #0a0a1a; color: #fff; padding: 20px; }
+    .glass-card { background: rgba(15,25,45,0.45); border-radius: 24px; padding: 20px; margin-bottom: 20px; }
+    label { color: #ccd6f0; }
+    .form-control, .form-select { background: rgba(0,0,0,0.5)!important; border: 1px solid #2a3a5a!important; color: #fff!important; }
+    .btn-neon { background: linear-gradient(90deg,#00b377,#00cc88); border: none; border-radius: 40px; padding: 8px 20px; font-weight: bold; color: #000; }
+    .text-muted { color: #a0b3cc !important; }
+</style>
+</head>
+<body><div class="container">
+<div class="glass-card"><h2><i class="fas fa-key me-2"></i>API Key Management</h2>
+<a href="/admin/dashboard" class="btn btn-secondary mb-3">← Back</a>
+
+<div class="card bg-dark mb-4"><div class="card-header">➕ Create New API Key</div><div class="card-body">
+<form method="POST" action="/admin/api_keys/create">
+  <div class="row">
+    <div class="col-md-3"><label>User ID</label><input type="text" name="user_id" class="form-control" placeholder="User ID" required></div>
+    <div class="col-md-3"><label>Key Name</label><input type="text" name="name" class="form-control" placeholder="My Bot" value="API Key"></div>
+    <div class="col-md-2"><label>Plan</label>
+      <select name="plan_name" class="form-select" id="planSelect" onchange="toggleCustom(this.value)">
+        <option value="">-- Select Plan --</option>
+        {% for p in plans %}<option value="{{ p.name }}">{{ p.name }}</option>{% endfor %}
+        <option value="custom">Custom</option>
+      </select>
+    </div>
+    <div class="col-md-2"><label>Expires (days)</label><input type="number" name="expires_days" class="form-control" placeholder="Never"></div>
+  </div>
+  <div class="row mt-2" id="customLimits" style="display:none;">
+    <div class="col-md-3"><label>Max Concurrent</label><input type="number" name="custom_concurrent" class="form-control" placeholder="e.g., 5"></div>
+    <div class="col-md-3"><label>Max Duration (s)</label><input type="number" name="custom_duration" class="form-control" placeholder="e.g., 300"></div>
+    <div class="col-md-3"><label>Max Threads</label><input type="number" name="custom_threads" class="form-control" placeholder="e.g., 5000"></div>
+  </div>
+  <button type="submit" class="btn-neon mt-3">Generate API Key</button>
+</form></div></div>
+
+<h4>Existing API Keys</h4>
+<div class="table-responsive"><table class="table table-dark">
+<thead><tr><th>Name</th><th>User</th><th>Key</th><th>Plan/Limits</th><th>Active</th><th>Attacks</th><th>Last Used</th><th>Expires</th><th>Actions</th></tr></thead>
+<tbody>
+{% for k in keys %}
+<tr>
+  <td>{{ k.name }}</td>
+  <td>{{ user_map[k.user_id] }}</td>
+  <td><code>{{ k.key[:12] }}...</code> <button class="btn btn-sm btn-outline-info" onclick="copyKey('{{ k.key }}')"><i class="fas fa-copy"></i></button></td>
+  <td>{% if k.plan_name %}{{ k.plan_name }}{% elif k.max_concurrent %}Custom{% else %}User Plan{% endif %}</td>
+  <td>{% if k.active %}✅{% else %}❌{% endif %}</td>
+  <td>{{ k.total_attacks }}</td>
+  <td>{{ k.last_used.strftime('%Y-%m-%d') if k.last_used else 'Never' }}</td>
+  <td>{{ k.expires_at.strftime('%Y-%m-%d') if k.expires_at else 'Never' }}</td>
+  <td>
+    <form method="POST" action="/admin/api_keys/{{ k._id if USE_MONGO else k.id }}/toggle" style="display:inline"><button class="btn btn-sm btn-warning">Toggle</button></form>
+    <form method="POST" action="/admin/api_keys/{{ k._id if USE_MONGO else k.id }}/delete" style="display:inline" onsubmit="return confirm('Delete?')"><button class="btn btn-sm btn-danger">Delete</button></form>
+  </td>
+</tr>
+{% endfor %}
+</tbody></table></div>
+</div></div>
+<script>
+function toggleCustom(val) { document.getElementById('customLimits').style.display = val === 'custom' ? 'flex' : 'none'; }
+function copyKey(key) { navigator.clipboard.writeText(key); alert('Key copied!'); }
+</script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body></html>
 '''
